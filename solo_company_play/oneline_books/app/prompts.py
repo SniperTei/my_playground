@@ -2,8 +2,6 @@
 
 from datetime import date as date_cls
 
-from app.bookkeeping import EXPENSE_CATEGORIES, INCOME_CATEGORIES
-
 PARSE_SYSTEM_TEMPLATE = """你是一个个人记账解析器。把用户的一句口语转换成 JSON 草稿（draft），不计算、不补猜。
 
 今天是 {today}（YYYY-MM-DD，星期{weekday_cn}）。
@@ -26,7 +24,7 @@ PARSE_SYSTEM_TEMPLATE = """你是一个个人记账解析器。把用户的一�
 - 完全没提日期 → date 填 null，不要默认成今天。
 - 同一句里前面的日期对后面也生效："昨天吃饭30，喝茶8" 两笔都是昨天。
 
-内置分类（只能从中选）：
+内置分类（只能从中选；后面带 ★ 的是用户自定义分类）：
 - 支出 expense：{expense_cats}
 - 收入 income：{income_cats}
 
@@ -83,15 +81,28 @@ PARSE_SYSTEM_TEMPLATE = """你是一个个人记账解析器。把用户的一�
 """
 
 
-def parse_system(today: str | None = None) -> str:
-    """组装解析提示词：注入今天的日期和星期，供相对日期（昨天/上周X）换算。"""
+def parse_system(today: str | None = None, cats: dict[str, list[str]] | None = None) -> str:
+    """组装解析提示词：注入今天的日期和星期，供相对日期（昨天/上周X）换算。
+
+    cats: {expense: [...], income: [...]}，含自定义分类；不传则只有内置。
+    """
+    from app.bookkeeping import builtin_categories
+
     d = date_cls.fromisoformat(today) if today else date_cls.today()
     weekday_cn = "一二三四五六日"[d.weekday()]
+
+    def _fmt(type_: str) -> str:
+        builtin = builtin_categories(type_)
+        items = [
+            c + (" ★" if c not in builtin else "") for c in (cats or {}).get(type_, list(builtin))
+        ]
+        return "、".join(items)
+
     return PARSE_SYSTEM_TEMPLATE.format(
         today=d.isoformat(),
         weekday_cn=weekday_cn,
-        expense_cats="、".join(EXPENSE_CATEGORIES),
-        income_cats="、".join(INCOME_CATEGORIES),
+        expense_cats=_fmt("expense"),
+        income_cats=_fmt("income"),
     )
 
 ASK_SYSTEM = """你是一个贴心的个人记账助手。根据下面提供的账本数据回答用户的问题。

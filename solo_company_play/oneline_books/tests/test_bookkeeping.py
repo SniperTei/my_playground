@@ -1,10 +1,13 @@
 import pytest
 
 from app.bookkeeping import (
-    BookkeepingError,
     EXPENSE_CATEGORIES,
     INCOME_CATEGORIES,
+    BookkeepingError,
+    add_category,
+    categories,
     record_draft,
+    remove_category,
     void_transaction,
 )
 from app.ledger import Ledger
@@ -141,3 +144,56 @@ def test_void_cross_month_keeps_books_balanced(ledger):
 def test_memo_defaults_to_category(ledger):
     r = record_draft(ledger, {"type": "expense", "category": "交通", "amount": 28, "note": ""}, "2026-11-06", "r1")
     assert r["memo"] == "交通"
+
+
+# ----- 自定义分类 -----
+
+def test_add_and_use_custom_category(ledger):
+    add_category(ledger, "expense", "运动健身")
+    cats = categories(ledger)
+    assert "运动健身" in cats["expense"] and "运动健身" not in cats["income"]
+    r = record_draft(ledger, {"type": "expense", "category": "运动健身", "amount": 20, "note": "健身"}, "2026-11-19", "r1")
+    assert r["posted"]
+    assert ledger.month_pnl_by_account("2026-11")["expense:运动健身"] == 20.0
+
+
+def test_custom_category_income_side(ledger):
+    add_category(ledger, "income", "房租收入")
+    record_draft(ledger, {"type": "income", "category": "房租收入", "amount": 3000, "note": "出租"}, "2026-11-19", "r1")
+    assert ledger.month_pnl("2026-11")["income"] == 3000.0
+
+
+def test_add_category_validations(ledger):
+    with pytest.raises(BookkeepingError):  # 重名内置
+        add_category(ledger, "expense", "餐饮")
+    with pytest.raises(BookkeepingError):  # 重复添加
+        add_category(ledger, "expense", "运动")
+        add_category(ledger, "expense", "运动")
+    with pytest.raises(BookkeepingError):  # 空名/超长
+        add_category(ledger, "expense", "  ")
+    with pytest.raises(BookkeepingError):
+        add_category(ledger, "expense", "这是一个超长分类名字呀")
+    with pytest.raises(BookkeepingError):  # 类型不对
+        add_category(ledger, "transfer", "转账")
+
+
+def test_record_with_unregistered_category_rejected(ledger):
+    # 没在设置里加过的分类不能直接入账
+    with pytest.raises(BookkeepingError):
+        record_draft(ledger, {"type": "expense", "category": "运动健身", "amount": 20, "note": ""}, "2026-11-19", "x1")
+
+
+def test_remove_category_rules(ledger):
+    with pytest.raises(BookkeepingError):  # 内置不能删
+        remove_category(ledger, "expense", "餐饮")
+    with pytest.raises(BookkeepingError):  # 不存在
+        remove_category(ledger, "expense", "运动")
+    add_category(ledger, "expense", "运动")
+    remove_category(ledger, "expense", "运动")
+    assert "运动" not in categories(ledger)["expense"]
+    # 删掉后新账不能再记这个分类，但历史分录保留
+    record_draft(ledger, {"type": "expense", "category": "运动", "amount": 20, "note": ""}, "2026-11-19", "k1")
+    remove_category(ledger, "expense", "运动")
+    with pytest.raises(BookkeepingError):
+        record_draft(ledger, {"type": "expense", "category": "运动", "amount": 20, "note": ""}, "2026-11-19", "k2")
+    assert ledger.month_pnl_by_account("2026-11")["expense:运动"] == 20.0

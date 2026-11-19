@@ -23,6 +23,9 @@ DRAFT_TYPES = ("income", "expense")
 EXPENSE_CATEGORIES = ("餐饮", "交通", "购物", "日用", "居住", "娱乐", "医疗", "人情", "教育", "通讯", "其他")
 INCOME_CATEGORIES = ("工资", "副业", "理财", "报销", "红包", "其他")
 
+# 自定义分类存在 ledger 的 names 表：kind = category:expense / category:income
+CAT_KIND = {"expense": "category:expense", "income": "category:income"}
+
 
 class BookkeepingError(ValueError):
     """draft 有问题，message 是直接给用户看的中文提示。"""
@@ -32,16 +35,50 @@ def _r2(x: float) -> float:
     return round(float(x), 2)
 
 
-def category_account(type_: str, category: str) -> str:
+def builtin_categories(type_: str) -> tuple[str, ...]:
+    return EXPENSE_CATEGORIES if type_ == "expense" else INCOME_CATEGORIES
+
+
+def categories(ledger: Ledger) -> dict[str, list[str]]:
+    """完整分类表：内置 + 自定义（设置页与解析提示词用）。"""
+    result = {}
+    for t in DRAFT_TYPES:
+        result[t] = list(builtin_categories(t)) + [
+            n for n in ledger.names(CAT_KIND[t]) if n not in builtin_categories(t)
+        ]
+    return result
+
+
+def add_category(ledger: Ledger, type_: str, name: str) -> None:
+    if type_ not in DRAFT_TYPES:
+        raise BookkeepingError("类型只能是 expense 或 income")
+    name = (name or "").strip()
+    if not name or len(name) > 12:
+        raise BookkeepingError("分类名 1-12 个字")
+    if name in builtin_categories(type_) or name in ledger.names(CAT_KIND[type_]):
+        raise BookkeepingError(f"分类「{name}」已经存在了")
+    ledger.add_name(CAT_KIND[type_], name)
+
+
+def remove_category(ledger: Ledger, type_: str, name: str) -> None:
+    """只能删自定义分类；内置的不给删。历史账目不受影响（账户和分录都留着）。"""
+    if name in builtin_categories(type_):
+        raise BookkeepingError(f"「{name}」是内置分类，不能删")
+    if name not in ledger.names(CAT_KIND[type_]):
+        raise BookkeepingError(f"自定义分类里没有「{name}」")
+    ledger.remove_name(CAT_KIND[type_], name)
+
+
+def category_account(ledger: Ledger, type_: str, category: str) -> str:
     if type_ not in DRAFT_TYPES:
         raise BookkeepingError("没看懂这是收入还是支出，换个说法试试，比如「午饭花了35」")
-    allowed = EXPENSE_CATEGORIES if type_ == "expense" else INCOME_CATEGORIES
+    allowed = categories(ledger)[type_]
     if category not in allowed:
-        raise BookkeepingError(f"分类「{category}」不在{type_}的内置分类里")
+        raise BookkeepingError(f"分类「{category}」不存在，去设置页加一个，或先用「其他」")
     return f"{type_}:{category}"
 
 
-def validate_draft(draft: dict) -> None:
+def validate_draft(ledger: Ledger, draft: dict) -> None:
     """校验 draft 完整性，缺信息抛 BookkeepingError（中文追问）。"""
     t = draft.get("type")
     if t not in DRAFT_TYPES:
@@ -54,15 +91,15 @@ def validate_draft(draft: dict) -> None:
     category = draft.get("category")
     if not category:
         raise BookkeepingError("这笔算哪个分类？（拿不准就填「其他」）")
-    category_account(t, category)  # 落在内置表内
+    category_account(ledger, t, category)  # 落在 内置+自定义 表内
 
 
 def record_draft(ledger: Ledger, draft: dict, date: str, ref_id: str) -> dict:
     """校验 + 生成分录 + 入账（ref_id 幂等）。返回入账预览。"""
-    validate_draft(draft)
+    validate_draft(ledger, draft)
     t = draft["type"]
     amount = _r2(draft["amount"])
-    account = category_account(t, draft["category"])
+    account = category_account(ledger, t, draft["category"])
     ledger.ensure_account("cash", "asset")
     ledger.ensure_account(account, t)
     note = (draft.get("note") or "").strip() or draft["category"]

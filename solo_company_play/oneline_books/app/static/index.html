@@ -106,6 +106,13 @@
   .bar-row .fill.exp { background: #f59e0b; }
   .bar-row .fill.inc { background: var(--ok); }
   .bar-row .val { width: 76px; text-align: right; flex: none; font-variant-numeric: tabular-nums; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    font-size: 13px; background: var(--bg); border: 1px solid var(--line);
+    border-radius: 16px; padding: 5px 12px; color: var(--ink);
+  }
+  .chip.custom { background: var(--brand-weak); border-color: var(--brand); color: var(--brand); }
 </style>
 </head>
 <body>
@@ -159,6 +166,31 @@
     <div class="monthbar"><input type="month" id="rmonth" onchange="loadReport()"></div>
     <div id="reportBox"></div>
   </section>
+
+  <!-- 设置 -->
+  <section class="tab" id="tab-settings">
+    <div class="box">
+      <h3 class="sec">支出分类</h3>
+      <div class="chips" id="expChips"></div>
+    </div>
+    <div class="box">
+      <h3 class="sec">收入分类</h3>
+      <div class="chips" id="incChips"></div>
+    </div>
+    <div class="box">
+      <h3 class="sec">添加自定义分类</h3>
+      <div class="askbar" style="margin-top:0">
+        <select id="newCatType" style="border:1px solid var(--line);border-radius:10px;padding:11px;background:var(--bg);font-family:inherit">
+          <option value="expense">支出</option><option value="income">收入</option>
+        </select>
+        <input id="newCatName" placeholder="分类名，如：运动健身" maxlength="12"
+               onkeydown="if(event.key==='Enter')addCat()">
+        <button onclick="addCat()">加</button>
+      </div>
+      <div class="hint">自定义分类立即对 AI 解析、月报分类图生效；删分类不影响历史账。</div>
+      <div class="err" id="catErr"></div>
+    </div>
+  </section>
 </main>
 
 <nav>
@@ -166,26 +198,35 @@
   <button data-tab="entries"><span class="ico">📋</span>流水</button>
   <button data-tab="ask"><span class="ico">💬</span>问账</button>
   <button data-tab="report"><span class="ico">📊</span>月报</button>
+  <button data-tab="settings"><span class="ico">⚙️</span>设置</button>
 </nav>
 
 <script>
 const $ = id => document.getElementById(id);
 const fmt = n => (n < 0 ? '-' : '') + Math.abs(n).toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-const CATS = {
+const BUILTIN = {
   expense: ['餐饮','交通','购物','日用','居住','娱乐','医疗','人情','教育','通讯','其他'],
   income: ['工资','副业','理财','报销','红包','其他'],
 };
+let CATS = JSON.parse(JSON.stringify(BUILTIN));  // 启动后从 /api/categories 刷新（含自定义）
+
+async function loadCategories() {
+  try { CATS = await api('/api/categories'); } catch (e) { /* 离线兜底用内置 */ }
+  if (document.querySelector('#tab-settings.active')) loadSettings();
+}
 
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x => x.classList.toggle('active', x === b));
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.id === 'tab-' + b.dataset.tab));
   if (b.dataset.tab === 'entries') loadEntries();
   if (b.dataset.tab === 'report') loadReport();
+  if (b.dataset.tab === 'settings') loadSettings();
 });
 
 const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
 let drafts = [];  // [{type,category,amount,date,note,status:'new'|'dup'|'ok',warn}]
 $('emonth').value = $('rmonth').value = todayStr().slice(0, 7);
+loadCategories();
 
 function esc(s) { return String(s ?? '').replace(/</g, '&lt;').replace(/"/g, '&quot;'); }
 
@@ -413,6 +454,41 @@ async function loadReport() {
     <div class="box"><h3 class="sec">现金余额（累计）</h3><div class="kv"><span>现金</span><b>${fmt(r.cash)}</b></div></div>
     <div class="box"><h3 class="sec">支出分类</h3>${bars(r.categories.expense, 'exp')}</div>
     <div class="box"><h3 class="sec">收入分类</h3>${bars(r.categories.income, 'inc')}</div>`;
+}
+
+/* ---- 设置：自定义分类 ---- */
+function renderChips(boxId, type) {
+  $(boxId).innerHTML = CATS[type].map(c => {
+    const custom = !BUILTIN[type].includes(c);
+    return `<span class="chip ${custom ? 'custom' : ''}">${c}${custom ? ` <a href="javascript:void(0)" onclick="delCat('${type}', '${c}')" style="color:var(--bad);text-decoration:none;font-weight:700">×</a>` : ''}</span>`;
+  }).join('');
+}
+function loadSettings() {
+  renderChips('expChips', 'expense');
+  renderChips('incChips', 'income');
+}
+async function addCat() {
+  $('catErr').textContent = '';
+  const type = $('newCatType').value, name = $('newCatName').value.trim();
+  if (!name) return;
+  try {
+    CATS = await api('/api/categories', {type, name});
+    $('newCatName').value = '';
+    loadSettings();
+  } catch (e) {
+    $('catErr').textContent = e.message;
+  }
+}
+async function delCat(type, name) {
+  if (!confirm(`删除自定义分类「${name}」？\n历史账目不受影响。`)) return;
+  try {
+    const r = await fetch(`/api/categories/${type}/${encodeURIComponent(name)}`, {method: 'DELETE'});
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+    CATS = await r.json();
+    loadSettings();
+  } catch (e) {
+    alert('删除失败：' + e.message);
+  }
 }
 </script>
 </body>

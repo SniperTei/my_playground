@@ -18,7 +18,15 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from . import llm, prompts
-from .bookkeeping import BookkeepingError, category_account, record_draft, void_transaction
+from .bookkeeping import (
+    BookkeepingError,
+    add_category,
+    categories,
+    category_account,
+    record_draft,
+    remove_category,
+    void_transaction,
+)
 from .ledger import Ledger
 
 DB_PATH = os.environ.get("BOOKS_DB", Path(__file__).resolve().parent.parent / "data" / "books.db")
@@ -83,7 +91,7 @@ def _report(month: str) -> dict:
 
 def _find_duplicate(date: str, draft: dict) -> dict | None:
     """同日同 type+category+amount 的最近一笔（未被作废的）→ 防重复入账。"""
-    account = category_account(draft.get("type"), draft.get("category"))
+    account = category_account(ledger, draft.get("type"), draft.get("category"))
     amount = round(float(draft["amount"]), 2)
     # expense 记在分类账户借方，income 记在贷方
     side = "p.debit" if draft["type"] == "expense" else "p.credit"
@@ -110,7 +118,9 @@ def parse(req: ParseReq):
     if not text:
         raise HTTPException(422, "说句话试试，比如「午饭花了35」")
     try:
-        draft = llm.chat_json(prompts.parse_system(), text)
+        with _lock:
+            cats = categories(ledger)
+        draft = llm.chat_json(prompts.parse_system(cats=cats), text)
     except RuntimeError as e:  # no API key
         raise HTTPException(503, str(e))
     except Exception as e:
@@ -170,6 +180,37 @@ def ask(req: AskReq):
     except Exception as e:
         raise HTTPException(502, f"AI 没答上来，再问一次（{e}）")
     return {"answer": answer, "report": this_month}
+
+
+@app.get("/api/categories")
+def get_categories():
+    with _lock:
+        return categories(ledger)
+
+
+class CategoryReq(BaseModel):
+    type: str
+    name: str
+
+
+@app.post("/api/categories")
+def post_category(req: CategoryReq):
+    try:
+        with _lock:
+            add_category(ledger, req.type, req.name)
+            return categories(ledger)
+    except BookkeepingError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.delete("/api/categories/{type_}/{name}")
+def delete_category(type_: str, name: str):
+    try:
+        with _lock:
+            remove_category(ledger, type_, name)
+            return categories(ledger)
+    except BookkeepingError as e:
+        raise HTTPException(422, str(e))
 
 
 @app.post("/api/void/{txn_id}")

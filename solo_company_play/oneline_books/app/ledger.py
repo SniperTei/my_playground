@@ -264,6 +264,22 @@ class Ledger:
                 detail["ap"][name[3:]] = round(-bal, 2)
         return detail
 
+    # ----- name registry（自定义分类等小型键值注册表） -----
+    def add_name(self, kind: str, name: str) -> None:
+        self.conn.execute(
+            "INSERT INTO names(kind, name) VALUES(?, ?) ON CONFLICT(kind, name) DO NOTHING",
+            (kind, name),
+        )
+        self.conn.commit()
+
+    def remove_name(self, kind: str, name: str) -> None:
+        self.conn.execute("DELETE FROM names WHERE kind=? AND name=?", (kind, name))
+        self.conn.commit()
+
+    def names(self, kind: str) -> list[str]:
+        rows = self.conn.execute("SELECT name FROM names WHERE kind=? ORDER BY name", (kind,)).fetchall()
+        return [r["name"] for r in rows]
+
     # ----- positions (inventory lots) -----
     def open_position(self, kind: str, ref: str, qty: float, unit_cost: float, date: str, meta: dict | None = None) -> int:
         cur = self.conn.execute(
