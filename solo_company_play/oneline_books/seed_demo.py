@@ -30,6 +30,11 @@ SEED = [
     ({"type": "expense", "category": "通讯", "amount": 100, "account": "尾号1234", "note": "充话费"}, "2026-11-15"),
     ({"type": "expense", "category": "交通", "amount": 28, "account": "支付宝", "note": "打车"}, "2026-11-16"),
     ({"type": "expense", "category": "购物", "amount": 699, "account": "尾号2345", "note": "买外套"}, "2026-11-18"),
+    # 往来欠款：借出/垫付/借入/结清
+    ({"type": "receivable", "person": "老王", "amount": 500, "account": "支付宝", "note": "借给老王"}, "2026-11-13"),
+    ({"type": "payable", "person": "小美", "category": "餐饮", "amount": 30, "note": "小美垫付午饭"}, "2026-11-14"),
+    ({"type": "payable", "person": "小明", "amount": 1000, "note": "跟小明借入"}, "2026-11-15"),
+    ({"type": "settle", "kind": "ar", "person": "老王", "amount": 200, "note": "老王还了一部分"}, "2026-11-17"),
 ]
 
 
@@ -46,9 +51,11 @@ def main() -> None:
     print("\n=== 2026-11 月报 ===")
     print("P&L:", lg.month_pnl("2026-11"))
     print("分类汇总:", lg.month_pnl_by_account("2026-11"))
-    from app.bookkeeping import account_balances
+    from app.bookkeeping import account_balances, people
 
     print("账户余额:", account_balances(lg))
+    print("往来欠款:", lg.ar_ap_detail())
+    print("往来人名:", people(lg))
     lg.close()
     print(f"\n库文件：{DB}")
 

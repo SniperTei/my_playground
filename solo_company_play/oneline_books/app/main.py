@@ -29,6 +29,7 @@ from .bookkeeping import (
     category_account,
     default_account,
     migrate_cash_account,
+    people,
     record_draft,
     remove_account,
     remove_category,
@@ -98,14 +99,15 @@ def _report(month: str) -> dict:
         "acct_default": default_account(ledger),
         "last_month": {"month": last, "net": last_net},
         "mom_diff": round(pnl["net"] - last_net, 2),
+        "ar_ap": ledger.ar_ap_detail(),  # 按人未结清欠款（月报卡片 + 问账上下文）
     }
 
 
 def _find_duplicate(date: str, draft: dict) -> dict | None:
-    """防重复：同日同 type+分类/转出转入+金额+账户 的最近一笔（未被作废的）。"""
+    """防重复：同日同 type+分类/转出转入+金额+账户（欠款类加人名）的最近一笔（未被作废的）。"""
     t = draft.get("type")
     amount = round(float(draft["amount"]), 2)
-    if t not in ("income", "expense", "transfer"):
+    if t not in ("income", "expense", "transfer", "receivable", "payable", "settle"):
         return None
     rows = ledger.conn.execute(
         """
@@ -128,6 +130,9 @@ def _find_duplicate(date: str, draft: dict) -> dict | None:
         if t == "transfer":
             if d.get("from_account") == draft.get("from_account") and d.get("to_account") == draft.get("to_account"):
                 return {"id": r["id"], "date": r["date"], "memo": r["memo"], "draft": d}
+        elif t in ("receivable", "payable", "settle"):
+            if str(d.get("person") or "").strip() == str(draft.get("person") or "").strip():
+                return {"id": r["id"], "date": r["date"], "memo": r["memo"], "draft": d}
         elif d.get("category") == draft.get("category") and norm_account(d.get("account")) == norm_account(draft.get("account")):
             return {"id": r["id"], "date": r["date"], "memo": r["memo"], "draft": d}
     return None
@@ -142,7 +147,8 @@ def parse(req: ParseReq):
         with _lock:
             cats = categories(ledger)
             accts = accounts_list(ledger)
-        draft = llm.chat_json(prompts.parse_system(cats=cats, accounts=accts), text)
+            ppl = people(ledger)
+        draft = llm.chat_json(prompts.parse_system(cats=cats, accounts=accts, people=ppl), text)
     except RuntimeError as e:  # no API key
         raise HTTPException(503, str(e))
     except Exception as e:
@@ -310,25 +316,35 @@ def export(month: str | None = None):
     """CSV 导出（UTF-8 + BOM，Excel 打开中文不乱码）。"""
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["日期", "类型", "分类", "金额", "账户", "转出", "转入", "备注", "状态"])
+    writer.writerow(["日期", "类型", "分类", "金额", "账户", "对方", "转出", "转入", "备注", "状态"])
     with _lock:
         for e in ledger.entries(month):
             if e["ref_id"].startswith("void-"):
                 continue  # 反转分录不导出，原交易标「已作废」
             d = e["draft"]
             t = d.get("type")
+            status = "已作废" if e["voided"] else "正常"
+            note = d.get("note") or e["memo"]
             if t == "transfer":
-                writer.writerow([e["date"], "转账", "", d.get("amount", ""), "",
-                                 d.get("from_account", ""), d.get("to_account", ""),
-                                 d.get("note") or e["memo"], "已作废" if e["voided"] else "正常"])
+                writer.writerow([e["date"], "转账", "", d.get("amount", ""), "", "",
+                                 d.get("from_account", ""), d.get("to_account", ""), note, status])
             elif t in ("income", "expense"):
                 writer.writerow([
                     e["date"], "收入" if t == "income" else "支出",
-                    d.get("category", ""), d.get("amount", ""), d.get("account", ""),
-                    "", "", d.get("note") or e["memo"], "已作废" if e["voided"] else "正常",
+                    d.get("category", ""), d.get("amount", ""), d.get("account", ""), "",
+                    "", "", note, status,
                 ])
+            elif t == "receivable":
+                writer.writerow([e["date"], "借出", "", d.get("amount", ""), d.get("account", ""),
+                                 d.get("person", ""), "", "", note, status])
+            elif t == "payable":
+                writer.writerow([e["date"], "应付", d.get("category") or "", d.get("amount", ""),
+                                 d.get("account", ""), d.get("person", ""), "", "", note, status])
+            elif t == "settle":
+                writer.writerow([e["date"], "结清", "", d.get("amount", ""), d.get("account", ""),
+                                 d.get("person", ""), "", "", note, status])
             else:
-                writer.writerow([e["date"], "", "", "", "", "", "", e["memo"], "已作废" if e["voided"] else "正常"])
+                writer.writerow([e["date"], "", "", "", "", "", "", "", e["memo"], status])
     filename = f"books{'-' + month if month else ''}.csv"
     return Response(
         content="\ufeff" + buf.getvalue(),

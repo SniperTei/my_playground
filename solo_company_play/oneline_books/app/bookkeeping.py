@@ -1,26 +1,35 @@
-"""draft → 复式分录（个人记账 v3：收支两类 + 多账户 + 转账）。
+"""draft → 复式分录（个人记账 v4：收支两类 + 多账户 + 转账 + 应收/应付）。
 
 draft schema（来自 /api/parse）：
 {type: income|expense, category, amount, account, note}，date 由前端带。
 {type: transfer, from_account, to_account, amount, note}。
+{type: receivable, person, amount, account?}（借出/帮人垫付，不计收支）。
+{type: payable, person, category?, amount, account?}（有分类=别人帮我垫付计支出；无分类=跟人借入不计收支）。
+{type: settle, kind: ar|ap, person, amount, account?}（结清欠款，不计收支）。
 
 - 分类 = 复式账户：`expense:餐饮`、`income:工资`……月度分类汇总走 month_pnl_by_account()。
 - 资金账户 = 资产账户：尾号1234、支付宝……注册在 names 表（kind=account），余额各自独立。
 - 转账 = 资产互转（Dr 入账账户 / Cr 出账账户），不计收支。
+- 往来人名 = 子账户：`ar:老王`（asset，别人欠我）、`ap:小美`（liability，我欠别人），
+  自动注册在 names 表（kind=person），未结清余额走 ar_ap_detail()。
 
 分录规则：
-- expense:  Dr expense:{分类} / Cr {账户}
-- income:   Dr {账户} / Cr income:{分类}
-- transfer: Dr {入账账户} / Cr {出账账户}
+- expense:     Dr expense:{分类} / Cr {账户}
+- income:      Dr {账户} / Cr income:{分类}
+- transfer:    Dr {入账账户} / Cr {出账账户}
+- receivable:  Dr ar:{人} / Cr {账户}（不计收支）
+- payable:     Dr expense:{分类} / Cr ap:{人}（垫付计支出）；Dr {账户} / Cr ap:{人}（借入不计收支）
+- settle(ar):  Dr {账户} / Cr ar:{人}；settle(ap): Dr ap:{人} / Cr {账户}（都不计收支）
 
 纠错 = 作废重记：void_transaction 读原分录→逐行反转→post ref=`void-{id}`（幂等留痕）。
+坏账 = 手工作废原应收 + 补记支出，不做专门 UI。
 """
 
 from __future__ import annotations
 
 from .ledger import Ledger
 
-DRAFT_TYPES = ("income", "expense", "transfer")
+DRAFT_TYPES = ("income", "expense", "transfer", "receivable", "payable", "settle")
 
 # 内置分类（与 prompts.py 的 few-shot 同步维护）
 EXPENSE_CATEGORIES = ("餐饮", "交通", "购物", "日用", "居住", "娱乐", "医疗", "人情", "教育", "通讯", "其他")
@@ -31,6 +40,12 @@ CAT_KIND = {"expense": "category:expense", "income": "category:income"}
 ACCOUNT_KIND = "account"
 DEFAULT_ACCOUNT_KIND = "account:default"
 DEFAULT_SEED_ACCOUNT = "现金"
+PEOPLE_KIND = "person"  # 往来人名注册表（应收/应付的对方）
+
+
+def people(ledger: Ledger) -> list[str]:
+    """已登记的往来人名（记账时自动注册，AI 解析提示词注入用）。"""
+    return ledger.names(PEOPLE_KIND)
 
 
 class BookkeepingError(ValueError):
@@ -154,9 +169,9 @@ def account_balances(ledger: Ledger) -> dict[str, float]:
     """各资金账户余额（资产借方为正）+ 合计。"""
     registered = set(ledger.names(ACCOUNT_KIND))
     result = {n: ledger.balance(n) for n in accounts_list(ledger)}
-    # 注册表外可能残留已删账户的历史余额，归到「其他账户」
+    # 注册表外可能残留已删账户的历史余额，归到「其他账户」；ar:/ap: 是往来欠款不是资金账户
     extra = {a: b for a, b in ledger.balances().items() if a not in registered and b != 0
-             and not a.startswith(("expense:", "income:")) and a not in ("cash", "founder_equity", "inventory", ADJUSTMENT_EQUITY)}
+             and not a.startswith(("expense:", "income:", "ar:", "ap:")) and a not in ("cash", "founder_equity", "inventory", ADJUSTMENT_EQUITY)}
     if extra:
         result.update(extra)
     result["__total__"] = round(sum(v for k, v in result.items() if k != "__total__"), 2)
@@ -221,6 +236,16 @@ def _validated_account(ledger: Ledger, name: str | None, what: str) -> str:
     return name
 
 
+def _validated_person(draft: dict) -> str:
+    """draft 里的往来人名：必填、不带冒号（会跟 ar:/ap: 子账户命名打架）。"""
+    person = str(draft.get("person") or "").strip()
+    if not person:
+        raise BookkeepingError("这笔跟谁？说一下对方名字")
+    if len(person) > 20 or ":" in person:
+        raise BookkeepingError("对方名字要 1-20 个字，且不能带冒号「:」")
+    return person
+
+
 # ----- draft 校验 + 入账 -----
 
 def validate_draft(ledger: Ledger, draft: dict) -> None:
@@ -238,6 +263,14 @@ def validate_draft(ledger: Ledger, draft: dict) -> None:
             raise BookkeepingError("从哪个账户转到哪个账户？")
         if draft["from_account"] == draft["to_account"]:
             raise BookkeepingError("转出和转入是同一个账户，记它干嘛？")
+        return
+
+    if t in ("receivable", "payable", "settle"):
+        _validated_person(draft)
+        if t == "settle" and draft.get("kind") not in ("ar", "ap"):
+            raise BookkeepingError("这是收回别人欠你的（ar）还是还你欠别人的（ap）？")
+        if t == "payable" and draft.get("category"):
+            category_account(ledger, "expense", draft["category"])  # 垫付分类落在支出表内
         return
 
     category = draft.get("category")
@@ -260,6 +293,46 @@ def record_draft(ledger: Ledger, draft: dict, date: str, ref_id: str) -> dict:
         ledger.ensure_account(to, "asset")
         lines = [(to, amount, 0.0), (frm, 0.0, amount)]
         memo = note or f"{frm} → {to}"
+    elif t in ("receivable", "payable", "settle"):
+        person = _validated_person(draft)
+        if t == "receivable":
+            acct = _validated_account(ledger, draft.get("account"), "出款")
+            contra = f"ar:{person}"
+            ledger.ensure_account(acct, "asset")
+            ledger.ensure_account(contra, "asset")
+            lines = [(contra, amount, 0.0), (acct, 0.0, amount)]
+            memo = note or f"借给{person}"
+        elif t == "payable":
+            contra = f"ap:{person}"
+            ledger.ensure_account(contra, "liability")
+            if draft.get("category"):
+                cat_account = category_account(ledger, "expense", draft["category"])
+                ledger.ensure_account(cat_account, "expense")
+                lines = [(cat_account, amount, 0.0), (contra, 0.0, amount)]
+                memo = note or f"{person}垫付（{draft['category']}）"
+            else:  # 跟人借入：钱进账户，不计收支
+                acct = _validated_account(ledger, draft.get("account"), "入账")
+                ledger.ensure_account(acct, "asset")
+                lines = [(acct, amount, 0.0), (contra, 0.0, amount)]
+                memo = note or f"跟{person}借入"
+        else:  # settle
+            kind = draft["kind"]
+            outstanding = ledger.ar_ap_detail()[kind].get(person, 0)
+            if outstanding <= 0:
+                raise BookkeepingError(f"{person}没有未结清的{'应收' if kind == 'ar' else '应付'}款项")
+            if amount > outstanding:
+                raise BookkeepingError(f"{person}的未结清{'应收' if kind == 'ar' else '应付'}只有 {outstanding:g}，不能结清 {amount:g}")
+            acct = _validated_account(ledger, draft.get("account"), "收/付款")
+            contra = f"{kind}:{person}"
+            ledger.ensure_account(acct, "asset")
+            ledger.ensure_account(contra, "asset" if kind == "ar" else "liability")
+            if kind == "ar":
+                lines = [(acct, amount, 0.0), (contra, 0.0, amount)]
+                memo = note or f"{person}还款"
+            else:
+                lines = [(contra, amount, 0.0), (acct, 0.0, amount)]
+                memo = note or f"还给{person}"
+        person_name = person  # 入账成功后注册人名（下方 post 之后）
     else:
         cat_account = category_account(ledger, t, draft["category"])
         acct = _validated_account(ledger, draft.get("account"), "收/付款")
@@ -272,6 +345,8 @@ def record_draft(ledger: Ledger, draft: dict, date: str, ref_id: str) -> dict:
         memo = note or draft["category"]
 
     txn_id = ledger.post(ref_id, date, memo, lines, draft=draft)
+    if txn_id is not None and t in ("receivable", "payable", "settle"):
+        ledger.add_name(PEOPLE_KIND, person_name)  # 人名自动注册，下次解析注入提示词
     return {
         "posted": txn_id is not None,
         "txn_id": txn_id,

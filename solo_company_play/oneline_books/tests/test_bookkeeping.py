@@ -13,6 +13,7 @@ from app.bookkeeping import (
     default_account,
     ensure_seed_account,
     migrate_cash_account,
+    people,
     record_draft,
     remove_account,
     remove_category,
@@ -359,3 +360,109 @@ def test_migrate_cash_account(tmp_path):
     migrate_cash_account(lg)  # 幂等
     assert lg.balance("现金") == -35
     lg.close()
+
+
+# ----- 应收/应付（v4） -----
+
+
+def test_receivable_entry_not_in_pnl(ledger):
+    r = record_draft(ledger, {"type": "receivable", "person": "老王", "amount": 500, "note": "借给老王"}, "2026-11-13", "r1")
+    assert r["posted"]
+    lines = {(l["account"], l["debit"], l["credit"]) for l in r["lines"]}
+    assert ("ar:老王", 500.0, 0.0) in lines
+    assert ("现金", 0.0, 500.0) in lines
+    # 借出不计收支
+    assert ledger.month_pnl("2026-11") == {"income": 0.0, "expense": 0.0, "net": 0.0}
+    assert ledger.ar_ap_detail() == {"ar": {"老王": 500.0}, "ap": {}}
+
+
+def test_payable_with_category_counts_expense(ledger):
+    # 别人帮我垫付：发生时计支出（权责发生制）
+    r = record_draft(ledger, {"type": "payable", "person": "小美", "category": "餐饮", "amount": 30, "note": ""}, "2026-11-14", "p1")
+    assert r["posted"]
+    lines = {(l["account"], l["debit"], l["credit"]) for l in r["lines"]}
+    assert ("expense:餐饮", 30.0, 0.0) in lines
+    assert ("ap:小美", 0.0, 30.0) in lines
+    assert ledger.month_pnl("2026-11")["expense"] == 30.0
+    assert ledger.ar_ap_detail()["ap"] == {"小美": 30.0}
+    # 偿还后不再计支出（不双计），应付归零
+    record_draft(ledger, {"type": "settle", "kind": "ap", "person": "小美", "amount": 30, "note": ""}, "2026-11-16", "s1")
+    assert ledger.month_pnl("2026-11")["expense"] == 30.0
+    assert ledger.ar_ap_detail()["ap"] == {}
+    assert ledger.balance("现金") == -30  # 还款真金白银出了账户
+
+
+def test_payable_borrow_no_pnl(ledger):
+    # 跟人借入：钱进账户，不计收支
+    r = record_draft(ledger, {"type": "payable", "person": "小明", "amount": 1000, "note": ""}, "2026-11-14", "p2")
+    assert r["posted"]
+    lines = {(l["account"], l["debit"], l["credit"]) for l in r["lines"]}
+    assert ("现金", 1000.0, 0.0) in lines
+    assert ("ap:小明", 0.0, 1000.0) in lines
+    assert ledger.month_pnl("2026-11") == {"income": 0.0, "expense": 0.0, "net": 0.0}
+    assert ledger.balance("现金") == 1000
+
+
+def test_settle_ar_partial_then_full(ledger):
+    record_draft(ledger, {"type": "receivable", "person": "老王", "amount": 500, "note": ""}, "2026-11-13", "r1")
+    record_draft(ledger, {"type": "settle", "kind": "ar", "person": "老王", "amount": 200, "note": ""}, "2026-11-17", "s1")
+    assert ledger.ar_ap_detail()["ar"] == {"老王": 300.0}
+    assert ledger.balance("现金") == -500 + 200
+    record_draft(ledger, {"type": "settle", "kind": "ar", "person": "老王", "amount": 300, "note": ""}, "2026-11-18", "s2")
+    assert ledger.ar_ap_detail()["ar"] == {}  # 全额结清后消失
+    d, c = ledger.trial_balance()
+    assert d == c
+
+
+def test_settle_rejects_over_and_missing(ledger):
+    record_draft(ledger, {"type": "receivable", "person": "老王", "amount": 500, "note": ""}, "2026-11-13", "r1")
+    with pytest.raises(BookkeepingError):  # 超额
+        record_draft(ledger, {"type": "settle", "kind": "ar", "person": "老王", "amount": 501, "note": ""}, "2026-11-17", "x1")
+    with pytest.raises(BookkeepingError):  # 没有这个人的应收
+        record_draft(ledger, {"type": "settle", "kind": "ar", "person": "小美", "amount": 10, "note": ""}, "2026-11-17", "x2")
+    with pytest.raises(BookkeepingError):  # ap 侧也没登记过
+        record_draft(ledger, {"type": "settle", "kind": "ap", "person": "老王", "amount": 10, "note": ""}, "2026-11-17", "x3")
+    assert ledger.ar_ap_detail()["ar"] == {"老王": 500.0}  # 账没动
+
+
+def test_person_auto_registered_and_validated(ledger):
+    record_draft(ledger, {"type": "receivable", "person": "老王", "amount": 500, "note": ""}, "2026-11-13", "r1")
+    assert people(ledger) == ["老王"]
+    record_draft(ledger, {"type": "payable", "person": "小美", "category": "餐饮", "amount": 30, "note": ""}, "2026-11-14", "p1")
+    assert sorted(people(ledger)) == ["小美", "老王"]
+    with pytest.raises(BookkeepingError):  # 缺人名
+        record_draft(ledger, {"type": "receivable", "amount": 100, "note": ""}, "2026-11-15", "x1")
+    with pytest.raises(BookkeepingError):  # settle 缺 kind
+        record_draft(ledger, {"type": "settle", "person": "老王", "amount": 100, "note": ""}, "2026-11-15", "x2")
+    with pytest.raises(BookkeepingError):  # 人名带冒号
+        record_draft(ledger, {"type": "receivable", "person": "a:b", "amount": 100, "note": ""}, "2026-11-15", "x3")
+    with pytest.raises(BookkeepingError):  # payable 分类不在支出表
+        record_draft(ledger, {"type": "payable", "person": "小美", "category": "工资", "amount": 100, "note": ""}, "2026-11-15", "x4")
+
+
+def test_ar_ap_excluded_from_account_balances(ledger):
+    add_account(ledger, "支付宝")
+    record_draft(ledger, {"type": "receivable", "person": "老王", "amount": 500, "account": "支付宝", "note": ""}, "2026-11-13", "r1")
+    record_draft(ledger, {"type": "payable", "person": "小明", "amount": 1000, "note": ""}, "2026-11-14", "p1")
+    b = account_balances(ledger)
+    assert "ar:老王" not in b and "ap:小明" not in b  # 往来欠款不混进资金账户
+    assert b["支付宝"] == -500
+    assert b["现金"] == 1000
+    assert b["__total__"] == 500
+
+
+def test_settle_ar_ap_person_summarized_by_person(ledger):
+    # 两个人各欠一笔，按人独立汇总；结清互不影响
+    record_draft(ledger, {"type": "receivable", "person": "老王", "amount": 500, "note": ""}, "2026-11-13", "r1")
+    record_draft(ledger, {"type": "receivable", "person": "小美", "amount": 30, "note": ""}, "2026-11-13", "r2")
+    assert ledger.ar_ap_detail()["ar"] == {"小美": 30.0, "老王": 500.0}
+    record_draft(ledger, {"type": "settle", "kind": "ar", "person": "小美", "amount": 30, "note": ""}, "2026-11-14", "s1")
+    assert ledger.ar_ap_detail()["ar"] == {"老王": 500.0}
+
+
+def test_ar_ap_void_reverses(ledger):
+    # 作废借出 → 应收回到零（坏账处理路径的前半段）
+    r = record_draft(ledger, {"type": "receivable", "person": "老王", "amount": 500, "note": ""}, "2026-11-13", "r1")
+    void_transaction(ledger, r["txn_id"], "2026-11-14")
+    assert ledger.ar_ap_detail()["ar"] == {}
+    assert ledger.balance("现金") == 0

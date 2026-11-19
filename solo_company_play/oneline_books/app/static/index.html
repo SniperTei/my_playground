@@ -257,9 +257,34 @@ function renderDrafts() {
   $('draftList').innerHTML = drafts.map((d, i) => {
     const acctOpts = cur => ACCOUNTS.map(a => `<option value="${a}" ${a === cur ? 'selected' : ''}>${a}</option>`).join('');
     const catOpts = cur => (CATS[d.type] || CATS.expense).map(c => `<option value="${c}" ${c === cur ? 'selected' : ''}>${c}</option>`).join('');
+    const payCatOpts = cur => `<option value="" ${!cur ? 'selected' : ''}>借入（无分类）</option>` + CATS.expense.map(c => `<option value="${c}" ${c === cur ? 'selected' : ''}>${c}</option>`).join('');
     const isTransfer = d.type === 'transfer';
+    const isArAp = ['receivable', 'payable', 'settle'].includes(d.type);
     const status = d.status === 'ok' ? '<span class="voidmark" style="color:var(--ok);background:#f0fdf4">✅ 已入账</span>'
       : d.status === 'dup' ? `<span class="voidmark">⚠️ 疑似重复</span>` : '';
+    let mid = '';
+    if (isTransfer) {
+      mid = `<div class="field"><label>转出账户</label><select onchange="updDraft(${i},'from_account',this.value)">${acctOpts(d.from_account || DEFAULT_ACCT)}</select></div>
+             <div class="field"><label>转入账户</label><select onchange="updDraft(${i},'to_account',this.value)">${acctOpts(d.to_account || ACCOUNTS.find(a => a !== (d.from_account || DEFAULT_ACCT)))}</select></div>`;
+    } else if (d.type === 'receivable') {
+      mid = `<div class="field"><label>对方（欠你钱的人）</label><input value="${esc(d.person || '')}" placeholder="如：老王" oninput="updDraft(${i},'person',this.value)"></div>
+             <div class="field"><label>出款账户</label><select onchange="updDraft(${i},'account',this.value)">${acctOpts(d.account || DEFAULT_ACCT)}</select></div>`;
+    } else if (d.type === 'payable') {
+      mid = `<div class="field"><label>对方（你欠钱的人）</label><input value="${esc(d.person || '')}" placeholder="如：小美" oninput="updDraft(${i},'person',this.value)"></div>
+             <div class="field"><label>分类（垫付计支出）</label><select onchange="updDraft(${i},'category',this.value || null)">${payCatOpts(d.category)}</select></div>
+             ${d.category ? '' : `<div class="field"><label>入账账户（借入）</label><select onchange="updDraft(${i},'account',this.value)">${acctOpts(d.account || DEFAULT_ACCT)}</select></div>`}`;
+    } else if (d.type === 'settle') {
+      mid = `<div class="field"><label>方向</label>
+               <select onchange="updDraft(${i},'kind',this.value)">
+                 <option value="ar" ${d.kind !== 'ap' ? 'selected' : ''}>收回（TA 欠我）</option>
+                 <option value="ap" ${d.kind === 'ap' ? 'selected' : ''}>偿还（我欠 TA）</option>
+               </select></div>
+             <div class="field"><label>对方</label><input value="${esc(d.person || '')}" placeholder="如：老王" oninput="updDraft(${i},'person',this.value)"></div>
+             <div class="field"><label>收/付款账户</label><select onchange="updDraft(${i},'account',this.value)">${acctOpts(d.account || DEFAULT_ACCT)}</select></div>`;
+    } else {
+      mid = `<div class="field"><label>分类</label><select onchange="updDraft(${i},'category',this.value)">${catOpts(d.category)}</select></div>
+             <div class="field"><label>${d.type === 'income' ? '入账账户' : '付款账户'}</label><select onchange="updDraft(${i},'account',this.value)">${acctOpts(d.account || DEFAULT_ACCT)}</select></div>`;
+    }
     return `<div class="dcard" style="opacity:${d.status === 'ok' ? .55 : 1}">
       ${drafts.length > 1 || d.status !== 'new' ? `<div style="display:flex;justify-content:space-between;margin-bottom:8px"><span class="sec" style="font-size:12px;color:var(--sub)">第 ${i + 1} 笔</span>${status}</div>` : ''}
       <div class="grid">
@@ -268,13 +293,12 @@ function renderDrafts() {
             <option value="expense" ${d.type === 'expense' ? 'selected' : ''}>支出</option>
             <option value="income" ${d.type === 'income' ? 'selected' : ''}>收入</option>
             <option value="transfer" ${isTransfer ? 'selected' : ''}>转账</option>
+            <option value="receivable" ${d.type === 'receivable' ? 'selected' : ''}>借出（应收）</option>
+            <option value="payable" ${d.type === 'payable' ? 'selected' : ''}>应付（欠人）</option>
+            <option value="settle" ${d.type === 'settle' ? 'selected' : ''}>结清</option>
           </select></div>
         <div class="field"><label>日期</label><input type="date" value="${esc(d.date || todayStr())}" onchange="updDraft(${i},'date',this.value)"></div>
-        ${isTransfer
-          ? `<div class="field"><label>转出账户</label><select onchange="updDraft(${i},'from_account',this.value)">${acctOpts(d.from_account || DEFAULT_ACCT)}</select></div>
-             <div class="field"><label>转入账户</label><select onchange="updDraft(${i},'to_account',this.value)">${acctOpts(d.to_account || ACCOUNTS.find(a => a !== (d.from_account || DEFAULT_ACCT)))}</select></div>`
-          : `<div class="field"><label>分类</label><select onchange="updDraft(${i},'category',this.value)">${catOpts(d.category)}</select></div>
-             <div class="field"><label>${d.type === 'income' ? '入账账户' : '付款账户'}</label><select onchange="updDraft(${i},'account',this.value)">${acctOpts(d.account || DEFAULT_ACCT)}</select></div>`}
+        ${mid}
         <div class="field"><label>金额</label><input inputmode="decimal" value="${esc(d.amount ?? '')}" oninput="updDraft(${i},'amount',this.value === '' ? null : Number(this.value))"></div>
         <div class="field wide"><label>备注</label><input value="${esc(d.note || '')}" oninput="updDraft(${i},'note',this.value)"></div>
       </div>
@@ -288,8 +312,17 @@ function updDraft(i, field, value) {
   const d = drafts[i];
   d[field] = value;
   if (field === 'type') {
-    if (d.type !== 'transfer' && !(CATS[d.type] || []).includes(d.category)) d.category = '其他';
-    if (d.type === 'transfer') { d.category = null; d.from_account = d.from_account || DEFAULT_ACCT; d.to_account = d.to_account || ACCOUNTS.find(a => a !== d.from_account); }
+    if (d.type === 'transfer') {
+      d.category = null; d.person = null; d.kind = null;
+      d.from_account = d.from_account || DEFAULT_ACCT; d.to_account = d.to_account || ACCOUNTS.find(a => a !== d.from_account);
+    } else if (d.type === 'receivable' || d.type === 'settle') {
+      d.category = null; if (!d.kind) d.kind = 'ar'; if (!d.person) d.person = '';
+    } else if (d.type === 'payable') {
+      d.kind = null; if (d.category && !CATS.expense.includes(d.category)) d.category = null;
+    } else {
+      d.person = null; d.kind = null;
+      if (!(CATS[d.type] || []).includes(d.category)) d.category = '其他';
+    }
   }
   renderDrafts();
 }
@@ -355,7 +388,7 @@ async function doParse() {
     }
     const list = Array.isArray(d) ? d : [d];  // 一句多笔 → 数组
     drafts = list.map(x => {
-      const type = ['income', 'expense', 'transfer'].includes(x.type) ? x.type : 'expense';
+      const type = ['income', 'expense', 'transfer', 'receivable', 'payable', 'settle'].includes(x.type) ? x.type : 'expense';
       const item = {
         type,
         amount: x.amount ?? null,
@@ -367,6 +400,15 @@ async function doParse() {
         item.category = null;
         item.from_account = ACCOUNTS.includes(x.from_account) ? x.from_account : DEFAULT_ACCT;
         item.to_account = ACCOUNTS.includes(x.to_account) ? x.to_account : ACCOUNTS.find(a => a !== item.from_account);
+      } else if (type === 'receivable' || type === 'settle') {
+        item.category = null;
+        item.person = x.person || '';
+        item.kind = type === 'settle' ? (x.kind === 'ap' ? 'ap' : 'ar') : null;
+        item.account = ACCOUNTS.includes(x.account) ? x.account : DEFAULT_ACCT;
+      } else if (type === 'payable') {
+        item.person = x.person || '';
+        item.category = (x.category && CATS.expense.includes(x.category)) ? x.category : null;
+        item.account = ACCOUNTS.includes(x.account) ? x.account : DEFAULT_ACCT;  // 仅借入（无分类）时用到
       } else {
         item.category = (CATS[type] || []).includes(x.category) ? x.category : '其他';
         item.account = ACCOUNTS.includes(x.account) ? x.account : DEFAULT_ACCT;
@@ -391,9 +433,18 @@ async function doRecordAll() {
     const d = drafts[i];
     if (d.status === 'ok') continue;
     try {
-      const payload = d.type === 'transfer'
-        ? {type: 'transfer', from_account: d.from_account, to_account: d.to_account, amount: d.amount, note: d.note}
-        : {type: d.type, category: d.category, amount: d.amount, account: d.account, note: d.note};
+      let payload;
+      if (d.type === 'transfer') {
+        payload = {type: 'transfer', from_account: d.from_account, to_account: d.to_account, amount: d.amount, note: d.note};
+      } else if (d.type === 'receivable' || d.type === 'settle') {
+        payload = {type: d.type, person: d.person, amount: d.amount, account: d.account, note: d.note};
+        if (d.type === 'settle') payload.kind = d.kind || 'ar';
+      } else if (d.type === 'payable') {
+        payload = {type: 'payable', person: d.person, category: d.category || null, amount: d.amount, note: d.note};
+        if (!d.category) payload.account = d.account;  // 借入才带账户
+      } else {
+        payload = {type: d.type, category: d.category, amount: d.amount, account: d.account, note: d.note};
+      }
       await api('/api/record', {
         draft: payload,
         date: d.date,
@@ -427,7 +478,8 @@ async function loadEntries() {
   box.innerHTML = list.map(e => {
     const d = e.draft || {};
     const isIn = d.type === 'income';
-    const neutral = d.type === 'transfer' || d.type === 'adjust';
+    // 中性显示（不计收支）：转账/余额调整/结清/借出/借入（payable 无分类）；垫付（payable 有分类）计支出
+    const neutral = ['transfer', 'adjust', 'settle', 'receivable'].includes(d.type) || (d.type === 'payable' && !d.category);
     const amount = neutral ? fmt(d.amount || 0) : (d.type ? (isIn ? '+' : '-') + fmt(d.amount || 0) : '');
     const amtHtml = d.type ? `<span class="amt ${neutral ? '' : (isIn ? 'pos' : 'neg')}">${amount}</span>` : '';
     const btn = (d.type && !e.voided && !e.ref_id.startsWith('void-'))
@@ -435,9 +487,11 @@ async function loadEntries() {
     const mark = e.voided ? '<span class="voidmark">已作废</span>'
       : (e.ref_id.startsWith('void-') ? '<span class="voidmark">作废冲销</span>' : '');
     const acct = d.type === 'transfer' ? `${d.from_account}→${d.to_account}` : (d.account || '');
+    const catTag = ['transfer', 'receivable', 'settle'].includes(d.type) ? '' : (d.category ? '#' + d.category + '　' : '');
+    const personTag = d.person ? `[对方:${d.person}]　` : '';
     return `<div class="entry ${e.voided ? 'voided' : ''}">
       <div class="m"><span><span class="tag ${isIn ? 'in' : ''}">${e.date}</span>${e.memo}</span>${amtHtml}</div>
-      <div class="d"><span>${mark}${d.type === 'transfer' ? '' : (d.category ? '#' + d.category + '　' : '')}${acct ? `[${acct}]　` : ''}${e.lines.map(l => `${l.account} ${l.debit ? '↑' + fmt(l.debit) : '↓' + fmt(l.credit)}`).join('　')}</span>${btn}</div>
+      <div class="d"><span>${mark}${catTag}${personTag}${acct ? `[${acct}]　` : ''}${e.lines.map(l => `${l.account} ${l.debit ? '↑' + fmt(l.debit) : '↓' + fmt(l.credit)}`).join('　')}</span>${btn}</div>
     </div>`;
   }).join('');
 }
@@ -488,6 +542,15 @@ async function loadReport() {
   };
   const mom = r.last_month.net !== 0 || r.mom_diff !== r.net
     ? `（上月净收支 ${fmt(r.last_month.net)}，${r.mom_diff >= 0 ? '多' : '少'}收 ${fmt(Math.abs(r.mom_diff))}）` : '';
+  const arAp = r.ar_ap || {};
+  const arRows = Object.entries(arAp.ar || {}).map(([p, v]) => `<div class="kv">
+    <span>${p} 欠我</span><span><b style="font-size:14px;margin-right:10px">${fmt(v)}</b>
+      <button class="btn" onclick="settleArAp('ar', '${p}', ${v})">收回</button></span></div>`).join('');
+  const apRows = Object.entries(arAp.ap || {}).map(([p, v]) => `<div class="kv">
+    <span>我欠 ${p}</span><span><b class="neg" style="font-size:14px;margin-right:10px">${fmt(v)}</b>
+      <button class="btn" onclick="settleArAp('ap', '${p}', ${v})">偿还</button></span></div>`).join('');
+  const arApBox = (arRows || apRows) ? `<div class="box"><h3 class="sec">往来欠款</h3>${arRows}${apRows}
+      <div class="hint">借出/收回、借入/偿还不计收支；垫付发生时已计支出。</div></div>` : '';
   $('reportBox').innerHTML = `
     <div class="box">
       <h3 class="sec">${r.month} 收支</h3>
@@ -500,8 +563,23 @@ async function loadReport() {
       ${Object.entries(r.accounts || {}).map(([k, v]) => `<div class="kv"><span>${k === r.acct_default ? k + '（默认）' : k}</span><b class="${v >= 0 ? '' : 'neg'}">${fmt(v)}</b></div>`).join('')}
       <div class="kv" style="border-top:1px solid var(--line)"><span><b>总资产</b></span><b class="${r.total >= 0 ? 'pos' : 'neg'}">${fmt(r.total || 0)}</b></div>
     </div>
+    ${arApBox}
     <div class="box"><h3 class="sec">支出分类</h3>${bars(r.categories.expense, 'exp')}</div>
     <div class="box"><h3 class="sec">收入分类</h3>${bars(r.categories.income, 'inc')}</div>`;
+}
+
+async function settleArAp(kind, person, outstanding) {
+  const v = prompt(`${kind === 'ar' ? `收回 ${person} 欠的钱` : `偿还欠 ${person} 的钱`}（未结清 ${fmt(outstanding)}）`, outstanding);
+  if (v === null) return;
+  const amount = parseFloat(v);
+  if (isNaN(amount) || amount <= 0) { alert('要填一个正数金额'); return; }
+  try {
+    await api('/api/record', {
+      draft: {type: 'settle', kind, person, amount, note: kind === 'ar' ? `${person}还款` : `还给${person}`},
+      date: todayStr(),
+    });
+    loadReport();
+  } catch (e) { alert('结清失败：' + e.message); }
 }
 
 /* ---- 设置：账户 + 自定义分类 ---- */

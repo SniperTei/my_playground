@@ -8,12 +8,14 @@ PARSE_SYSTEM_TEMPLATE = """你是一个个人记账解析器。把用户的一�
 
 输出 schema（金额为数字，单位元）：
 {{
-  "type": "income | expense | transfer",
-  "category": "内置分类之一（transfer 时为 null）",
+  "type": "income | expense | transfer | receivable | payable | settle",
+  "category": "内置分类之一（transfer/receivable/settle 时为 null）",
   "amount": 金额数字,
   "account": "资金账户名或 null（见下方账户列表；没提账户就 null）",
   "from_account": "仅 transfer：转出账户",
   "to_account": "仅 transfer：转入账户",
+  "person": "对方人名（仅 receivable/payable/settle 填，其他为 null）",
+  "kind": "仅 settle：ar=收回别人欠我的钱，ap=还我欠别人的钱",
   "date": "YYYY-MM-DD 或 null（没提日期就 null）",
   "note": "原话摘要"
 }}
@@ -21,10 +23,20 @@ PARSE_SYSTEM_TEMPLATE = """你是一个个人记账解析器。把用户的一�
 用户的资金账户（account/from_account/to_account 只能从中选）：
 {accounts}
 
+已登记的往来人名（person 从中优先选；新名字也可以直接用）：
+{people}
+
 账户规则：
 - 提到从哪付/收：「支付宝买的」「微信收的」「从尾号2345的卡扣的」→ account 填对应账户。
 - 没提账户 → account 填 null（默认账户），不要猜。
 - 转账：「从A转/划/冲了X到B」「A转B 1000」→ type=transfer，from_account=A，to_account=B，category=null。发工资到某卡、余额宝收益属于 income 不是转账。
+
+往来欠款规则（person 填对方人名）：
+- 借给别人钱 / 我帮别人垫付：「借给老王500」「帮老王垫付了200」→ type=receivable，category=null。
+- 别人帮我付了钱（我欠对方）：「朋友小美帮我垫付了30饭钱」→ type=payable，category=餐饮（发生时计支出）。
+- 跟别人借入钱：「跟小明借了1000」→ type=payable，category=null（借入不计收支）。
+- 对方还我钱：「老王还了我500」「老王还我500」→ type=settle，kind=ar，person=老王。
+- 我还对方钱：「还了小美30」「我还小明100」→ type=settle，kind=ap，person=小美/小明。
 
 一句话里有几笔就输出几笔：
 - 只有一笔 → 输出单个对象
@@ -93,6 +105,21 @@ PARSE_SYSTEM_TEMPLATE = """你是一个个人记账解析器。把用户的一�
 "帮朋友做设计收了2000"
 → {{"type":"income","category":"副业","amount":2000,"date":null,"note":"设计兼职"}}
 
+"借给老王500"
+→ {{"type":"receivable","person":"老王","category":null,"amount":500,"account":null,"date":null,"note":"借给老王"}}
+
+"朋友小美帮我垫付了30饭钱"
+→ {{"type":"payable","person":"小美","category":"餐饮","amount":30,"account":null,"date":null,"note":"小美垫付饭钱"}}
+
+"跟小明借了1000"
+→ {{"type":"payable","person":"小明","category":null,"amount":1000,"account":null,"date":null,"note":"跟小明借入"}}
+
+"老王还了我500"
+→ {{"type":"settle","kind":"ar","person":"老王","category":null,"amount":500,"account":null,"date":null,"note":"老王还款"}}
+
+"还了小美30"
+→ {{"type":"settle","kind":"ap","person":"小美","category":null,"amount":30,"account":null,"date":null,"note":"还小美垫付款"}}
+
 "花了60块"（看不出花在哪）
 → {{"type":"expense","category":"其他","amount":60,"date":null,"note":"杂项支出"}}
 
@@ -105,11 +132,13 @@ def parse_system(
     today: str | None = None,
     cats: dict[str, list[str]] | None = None,
     accounts: list[str] | None = None,
+    people: list[str] | None = None,
 ) -> str:
-    """组装解析提示词：注入今天的日期和星期、分类表、资金账户列表。
+    """组装解析提示词：注入今天的日期和星期、分类表、资金账户列表、往来人名。
 
     cats: {expense: [...], income: [...]}，含自定义分类；不传则只有内置。
     accounts: 资金账户名列表；不传则不注入账户示例（AI 只会填 null）。
+    people: 往来人名列表（记账时自动注册）；不传则提示还没有登记。
     """
     from app.bookkeeping import builtin_categories
 
@@ -129,6 +158,7 @@ def parse_system(
         expense_cats=_fmt("expense"),
         income_cats=_fmt("income"),
         accounts="、".join(accounts or ["（用户还没设置账户）"]),
+        people="、".join(people or ["（还没有登记过，遇到直接填人名）"]),
     )
 
 ASK_SYSTEM = """你是一个贴心的个人记账助手。根据下面提供的账本数据回答用户的问题。
