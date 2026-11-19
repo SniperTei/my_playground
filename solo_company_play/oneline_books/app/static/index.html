@@ -170,6 +170,17 @@
   <!-- 设置 -->
   <section class="tab" id="tab-settings">
     <div class="box">
+      <h3 class="sec">资金账户</h3>
+      <div id="acctList"></div>
+      <div class="askbar" style="margin-top:10px">
+        <input id="newAcctName" placeholder="账户名，如：尾号1234、支付宝" maxlength="20"
+               onkeydown="if(event.key==='Enter')addAcct()">
+        <button onclick="addAcct()">加</button>
+      </div>
+      <div class="hint">记账时选「从哪个账户出/入」。点击账户名设为默认（没说账户时用它）。</div>
+      <div class="err" id="acctErr"></div>
+    </div>
+    <div class="box">
       <h3 class="sec">支出分类</h3>
       <div class="chips" id="expChips"></div>
     </div>
@@ -209,9 +220,19 @@ const BUILTIN = {
   income: ['工资','副业','理财','报销','红包','其他'],
 };
 let CATS = JSON.parse(JSON.stringify(BUILTIN));  // 启动后从 /api/categories 刷新（含自定义）
+let ACCOUNTS = ['现金'], DEFAULT_ACCT = '现金';
 
 async function loadCategories() {
   try { CATS = await api('/api/categories'); } catch (e) { /* 离线兜底用内置 */ }
+  if (document.querySelector('#tab-settings.active')) loadSettings();
+}
+
+async function loadAccounts() {
+  try {
+    const r = await api('/api/accounts');
+    ACCOUNTS = r.accounts.length ? r.accounts : ['现金'];
+    DEFAULT_ACCT = r.default || ACCOUNTS[0];
+  } catch (e) { /* 离线兜底 */ }
   if (document.querySelector('#tab-settings.active')) loadSettings();
 }
 
@@ -227,13 +248,16 @@ const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${Stri
 let drafts = [];  // [{type,category,amount,date,note,status:'new'|'dup'|'ok',warn}]
 $('emonth').value = $('rmonth').value = todayStr().slice(0, 7);
 loadCategories();
+loadAccounts();
 
 function esc(s) { return String(s ?? '').replace(/</g, '&lt;').replace(/"/g, '&quot;'); }
 
 function renderDrafts() {
   $('draftTitle').textContent = drafts.length > 1 ? `草稿 · ${drafts.length} 笔，核对后入账（可改）` : '草稿 · 核对后入账（可改）';
   $('draftList').innerHTML = drafts.map((d, i) => {
-    const catOpts = cur => CATS[d.type].map(c => `<option value="${c}" ${c === cur ? 'selected' : ''}>${c}</option>`).join('');
+    const acctOpts = cur => ACCOUNTS.map(a => `<option value="${a}" ${a === cur ? 'selected' : ''}>${a}</option>`).join('');
+    const catOpts = cur => (CATS[d.type] || CATS.expense).map(c => `<option value="${c}" ${c === cur ? 'selected' : ''}>${c}</option>`).join('');
+    const isTransfer = d.type === 'transfer';
     const status = d.status === 'ok' ? '<span class="voidmark" style="color:var(--ok);background:#f0fdf4">✅ 已入账</span>'
       : d.status === 'dup' ? `<span class="voidmark">⚠️ 疑似重复</span>` : '';
     return `<div class="dcard" style="opacity:${d.status === 'ok' ? .55 : 1}">
@@ -243,9 +267,14 @@ function renderDrafts() {
           <select onchange="updDraft(${i},'type',this.value)">
             <option value="expense" ${d.type === 'expense' ? 'selected' : ''}>支出</option>
             <option value="income" ${d.type === 'income' ? 'selected' : ''}>收入</option>
+            <option value="transfer" ${isTransfer ? 'selected' : ''}>转账</option>
           </select></div>
         <div class="field"><label>日期</label><input type="date" value="${esc(d.date || todayStr())}" onchange="updDraft(${i},'date',this.value)"></div>
-        <div class="field"><label>分类</label><select onchange="updDraft(${i},'category',this.value)">${catOpts(d.category)}</select></div>
+        ${isTransfer
+          ? `<div class="field"><label>转出账户</label><select onchange="updDraft(${i},'from_account',this.value)">${acctOpts(d.from_account || DEFAULT_ACCT)}</select></div>
+             <div class="field"><label>转入账户</label><select onchange="updDraft(${i},'to_account',this.value)">${acctOpts(d.to_account || ACCOUNTS.find(a => a !== (d.from_account || DEFAULT_ACCT)))}</select></div>`
+          : `<div class="field"><label>分类</label><select onchange="updDraft(${i},'category',this.value)">${catOpts(d.category)}</select></div>
+             <div class="field"><label>${d.type === 'income' ? '入账账户' : '付款账户'}</label><select onchange="updDraft(${i},'account',this.value)">${acctOpts(d.account || DEFAULT_ACCT)}</select></div>`}
         <div class="field"><label>金额</label><input inputmode="decimal" value="${esc(d.amount ?? '')}" oninput="updDraft(${i},'amount',this.value === '' ? null : Number(this.value))"></div>
         <div class="field wide"><label>备注</label><input value="${esc(d.note || '')}" oninput="updDraft(${i},'note',this.value)"></div>
       </div>
@@ -258,7 +287,10 @@ function renderDrafts() {
 function updDraft(i, field, value) {
   const d = drafts[i];
   d[field] = value;
-  if (field === 'type' && !CATS[d.type].includes(d.category)) d.category = '其他';
+  if (field === 'type') {
+    if (d.type !== 'transfer' && !(CATS[d.type] || []).includes(d.category)) d.category = '其他';
+    if (d.type === 'transfer') { d.category = null; d.from_account = d.from_account || DEFAULT_ACCT; d.to_account = d.to_account || ACCOUNTS.find(a => a !== d.from_account); }
+  }
   renderDrafts();
 }
 
@@ -323,15 +355,23 @@ async function doParse() {
     }
     const list = Array.isArray(d) ? d : [d];  // 一句多笔 → 数组
     drafts = list.map(x => {
-      const type = x.type === 'income' ? 'income' : 'expense';
-      return {
+      const type = ['income', 'expense', 'transfer'].includes(x.type) ? x.type : 'expense';
+      const item = {
         type,
-        category: CATS[type].includes(x.category) ? x.category : '其他',
         amount: x.amount ?? null,
         date: x.date || todayStr(),  // AI 换算出的绝对日期（昨天/上周X…），没提默认今天
         note: x.note || '',
         status: 'new', warn: '',
       };
+      if (type === 'transfer') {
+        item.category = null;
+        item.from_account = ACCOUNTS.includes(x.from_account) ? x.from_account : DEFAULT_ACCT;
+        item.to_account = ACCOUNTS.includes(x.to_account) ? x.to_account : ACCOUNTS.find(a => a !== item.from_account);
+      } else {
+        item.category = (CATS[type] || []).includes(x.category) ? x.category : '其他';
+        item.account = ACCOUNTS.includes(x.account) ? x.account : DEFAULT_ACCT;
+      }
+      return item;
     });
     renderDrafts();
     $('draftCard').style.display = '';
@@ -351,8 +391,11 @@ async function doRecordAll() {
     const d = drafts[i];
     if (d.status === 'ok') continue;
     try {
+      const payload = d.type === 'transfer'
+        ? {type: 'transfer', from_account: d.from_account, to_account: d.to_account, amount: d.amount, note: d.note}
+        : {type: d.type, category: d.category, amount: d.amount, account: d.account, note: d.note};
       await api('/api/record', {
-        draft: {type: d.type, category: d.category, amount: d.amount, note: d.note},
+        draft: payload,
         date: d.date,
         force: d.status === 'dup',  // 疑似重复的这轮强制入账
       });
@@ -384,15 +427,16 @@ async function loadEntries() {
   box.innerHTML = list.map(e => {
     const d = e.draft || {};
     const isIn = d.type === 'income';
-    const amount = d.type ? (isIn ? '+' : '-') + fmt(d.amount || 0) : '';
+    const amount = d.type === 'transfer' ? fmt(d.amount || 0) : (d.type ? (isIn ? '+' : '-') + fmt(d.amount || 0) : '');
     const amtHtml = d.type ? `<span class="amt ${isIn ? 'pos' : 'neg'}">${amount}</span>` : '';
     const btn = (d.type && !e.voided && !e.ref_id.startsWith('void-'))
       ? `<button class="btn danger" onclick="doVoid(${e.id}, '${(e.memo || '').replace(/'/g, "\\'")}')">作废</button>` : '';
     const mark = e.voided ? '<span class="voidmark">已作废</span>'
       : (e.ref_id.startsWith('void-') ? '<span class="voidmark">作废冲销</span>' : '');
+    const acct = d.type === 'transfer' ? `${d.from_account}→${d.to_account}` : (d.account || '');
     return `<div class="entry ${e.voided ? 'voided' : ''}">
       <div class="m"><span><span class="tag ${isIn ? 'in' : ''}">${e.date}</span>${e.memo}</span>${amtHtml}</div>
-      <div class="d"><span>${mark}${d.category ? '#' + d.category + '　' : ''}${e.lines.map(l => `${l.account} ${l.debit ? '↑' + fmt(l.debit) : '↓' + fmt(l.credit)}`).join('　')}</span>${btn}</div>
+      <div class="d"><span>${mark}${d.type === 'transfer' ? '' : (d.category ? '#' + d.category + '　' : '')}${acct ? `[${acct}]　` : ''}${e.lines.map(l => `${l.account} ${l.debit ? '↑' + fmt(l.debit) : '↓' + fmt(l.credit)}`).join('　')}</span>${btn}</div>
     </div>`;
   }).join('');
 }
@@ -451,12 +495,59 @@ async function loadReport() {
       <div class="kv"><span>净收支</span><b class="${r.net >= 0 ? 'pos' : 'neg'}">${fmt(r.net)}</b></div>
       <div class="kv"><span>环比上月</span><b class="${r.mom_diff >= 0 ? 'pos' : 'neg'}">${mom ? fmt(r.mom_diff) : '—'}</b></div>
     </div>
-    <div class="box"><h3 class="sec">现金余额（累计）</h3><div class="kv"><span>现金</span><b>${fmt(r.cash)}</b></div></div>
+    <div class="box"><h3 class="sec">账户余额（累计）</h3>
+      ${Object.entries(r.accounts || {}).map(([k, v]) => `<div class="kv"><span>${k === r.acct_default ? k + '（默认）' : k}</span><b class="${v >= 0 ? '' : 'neg'}">${fmt(v)}</b></div>`).join('')}
+      <div class="kv" style="border-top:1px solid var(--line)"><span><b>总资产</b></span><b class="${r.total >= 0 ? 'pos' : 'neg'}">${fmt(r.total || 0)}</b></div>
+    </div>
     <div class="box"><h3 class="sec">支出分类</h3>${bars(r.categories.expense, 'exp')}</div>
     <div class="box"><h3 class="sec">收入分类</h3>${bars(r.categories.income, 'inc')}</div>`;
 }
 
-/* ---- 设置：自定义分类 ---- */
+/* ---- 设置：账户 + 自定义分类 ---- */
+async function renderAccounts() {
+  let data;
+  try { data = await api('/api/accounts'); } catch (e) { return; }
+  ACCOUNTS = data.accounts.length ? data.accounts : ['现金'];
+  DEFAULT_ACCT = data.default || ACCOUNTS[0];
+  $('acctList').innerHTML = ACCOUNTS.map(a => {
+    const bal = (data.balances || {})[a];
+    const isDefault = a === DEFAULT_ACCT;
+    return `<div class="kv">
+      <span><a href="javascript:void(0)" onclick="setDefaultAcct('${a}')" style="color:inherit;text-decoration:none;${isDefault ? 'font-weight:700' : ''}">${a}${isDefault ? ' ⭐默认' : ''}</a></span>
+      <span><b style="font-size:14px;margin-right:10px">${bal == null ? '' : fmt(bal)}</b>
+        <button class="btn danger" onclick="delAcct('${a}')">删</button></span>
+    </div>`;
+  }).join('');
+}
+async function addAcct() {
+  $('acctErr').textContent = '';
+  const name = $('newAcctName').value.trim();
+  if (!name) return;
+  try {
+    const r = await api('/api/accounts', {name});
+    ACCOUNTS = r.accounts; DEFAULT_ACCT = r.default || ACCOUNTS[0];
+    $('newAcctName').value = '';
+    renderAccounts();
+  } catch (e) { $('acctErr').textContent = e.message; }
+}
+async function delAcct(name) {
+  if (!confirm(`删除账户「${name}」？\n（有余额或有流水的账户不能删）`)) return;
+  try {
+    const r = await fetch(`/api/accounts/${encodeURIComponent(name)}`, {method: 'DELETE'});
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+    const data = await r.json();
+    ACCOUNTS = data.accounts; DEFAULT_ACCT = data.default || ACCOUNTS[0];
+    renderAccounts();
+  } catch (e) { alert('删除失败：' + e.message); }
+}
+async function setDefaultAcct(name) {
+  try {
+    const r = await api(`/api/accounts/${encodeURIComponent(name)}/default`, {});
+    DEFAULT_ACCT = r.default;
+    renderAccounts();
+  } catch (e) { alert('设置失败：' + e.message); }
+}
+
 function renderChips(boxId, type) {
   $(boxId).innerHTML = CATS[type].map(c => {
     const custom = !BUILTIN[type].includes(c);
@@ -464,6 +555,7 @@ function renderChips(boxId, type) {
   }).join('');
 }
 function loadSettings() {
+  renderAccounts();
   renderChips('expChips', 'expense');
   renderChips('incChips', 'income');
 }

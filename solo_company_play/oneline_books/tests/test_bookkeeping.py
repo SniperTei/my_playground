@@ -4,10 +4,18 @@ from app.bookkeeping import (
     EXPENSE_CATEGORIES,
     INCOME_CATEGORIES,
     BookkeepingError,
+    account_balances,
+    accounts_list,
+    add_account,
     add_category,
     categories,
+    default_account,
+    ensure_seed_account,
+    migrate_cash_account,
     record_draft,
+    remove_account,
     remove_category,
+    set_default_account,
     void_transaction,
 )
 from app.ledger import Ledger
@@ -16,6 +24,7 @@ from app.ledger import Ledger
 @pytest.fixture()
 def ledger(tmp_path):
     lg = Ledger(tmp_path / "t.db", initial_capital=0)
+    ensure_seed_account(lg)  # 种默认「现金」，等价 main 启动
     yield lg
     lg.close()
 
@@ -25,17 +34,17 @@ def test_expense_entry(ledger):
     assert r["posted"]
     lines = {(l["account"], l["debit"], l["credit"]) for l in r["lines"]}
     assert ("expense:餐饮", 35.0, 0.0) in lines
-    assert ("cash", 0.0, 35.0) in lines
-    assert ledger.balance("cash") == -35
+    assert ("现金", 0.0, 35.0) in lines
+    assert ledger.balance("现金") == -35
 
 
 def test_income_entry(ledger):
     r = record_draft(ledger, {"type": "income", "category": "工资", "amount": 23000, "note": "发工资"}, "2026-11-05", "r1")
     assert r["posted"]
     lines = {(l["account"], l["debit"], l["credit"]) for l in r["lines"]}
-    assert ("cash", 23000.0, 0.0) in lines
+    assert ("现金", 23000.0, 0.0) in lines
     assert ("income:工资", 0.0, 23000.0) in lines
-    assert ledger.balance("cash") == 23000
+    assert ledger.balance("现金") == 23000
 
 
 def test_category_accounts_tracked(ledger):
@@ -91,14 +100,14 @@ def test_idempotent_ref(ledger):
     r1 = record_draft(ledger, d, "2026-11-01", "same-ref")
     r2 = record_draft(ledger, d, "2026-11-01", "same-ref")
     assert r1["posted"] and not r2["posted"]
-    assert ledger.balance("cash") == -100
+    assert ledger.balance("现金") == -100
 
 
 def test_void_reverses(ledger):
     r = record_draft(ledger, {"type": "expense", "category": "餐饮", "amount": 35, "note": "午饭"}, "2026-11-06", "r1")
     v = void_transaction(ledger, r["txn_id"], "2026-11-06")
     assert v["posted"]
-    assert ledger.balance("cash") == 0
+    assert ledger.balance("现金") == 0
     assert ledger.month_pnl("2026-11") == {"income": 0.0, "expense": 0.0, "net": 0.0}  # 月报归零
     assert ledger.month_pnl_by_account("2026-11") == {}  # 分类汇总也归零
     # 留痕：两笔交易都在
@@ -113,7 +122,7 @@ def test_void_is_idempotent(ledger):
     v1 = void_transaction(ledger, r["txn_id"], "2026-11-06")
     v2 = void_transaction(ledger, r["txn_id"], "2026-11-06")
     assert v1["posted"] and not v2["posted"]
-    assert ledger.balance("cash") == 0
+    assert ledger.balance("现金") == 0
     d, c = ledger.trial_balance()
     assert d == c
 
@@ -138,7 +147,7 @@ def test_void_cross_month_keeps_books_balanced(ledger):
     assert ledger.month_pnl("2026-12")["expense"] == -35.0
     d, c = ledger.trial_balance()
     assert d == c
-    assert ledger.balance("cash") == 0
+    assert ledger.balance("现金") == 0
 
 
 def test_memo_defaults_to_category(ledger):
@@ -172,7 +181,7 @@ def test_add_category_validations(ledger):
     with pytest.raises(BookkeepingError):  # 空名/超长
         add_category(ledger, "expense", "  ")
     with pytest.raises(BookkeepingError):
-        add_category(ledger, "expense", "这是一个超长分类名字呀")
+        add_category(ledger, "expense", "这是一个超过了十二个字的分类名字")
     with pytest.raises(BookkeepingError):  # 类型不对
         add_category(ledger, "transfer", "转账")
 
@@ -189,11 +198,126 @@ def test_remove_category_rules(ledger):
     with pytest.raises(BookkeepingError):  # 不存在
         remove_category(ledger, "expense", "运动")
     add_category(ledger, "expense", "运动")
+    record_draft(ledger, {"type": "expense", "category": "运动", "amount": 20, "note": ""}, "2026-11-19", "k1")
     remove_category(ledger, "expense", "运动")
     assert "运动" not in categories(ledger)["expense"]
     # 删掉后新账不能再记这个分类，但历史分录保留
-    record_draft(ledger, {"type": "expense", "category": "运动", "amount": 20, "note": ""}, "2026-11-19", "k1")
-    remove_category(ledger, "expense", "运动")
     with pytest.raises(BookkeepingError):
         record_draft(ledger, {"type": "expense", "category": "运动", "amount": 20, "note": ""}, "2026-11-19", "k2")
     assert ledger.month_pnl_by_account("2026-11")["expense:运动"] == 20.0
+
+
+# ----- 多账户 + 转账 -----
+
+def test_accounts_seed_and_default(ledger):
+    accts = accounts_list(ledger)
+    assert accts == ["现金"]  # 空注册表自动种「现金」
+    assert default_account(ledger) == "现金"
+
+
+def test_expense_with_account(ledger):
+    add_account(ledger, "尾号1234")
+    add_account(ledger, "支付宝")
+    r = record_draft(ledger, {"type": "expense", "category": "餐饮", "amount": 35, "account": "支付宝", "note": "午饭"}, "2026-11-06", "r1")
+    lines = {(l["account"], l["debit"], l["credit"]) for l in r["lines"]}
+    assert ("支付宝", 0.0, 35.0) in lines
+    assert ledger.balance("支付宝") == -35
+    assert ledger.balance("现金") == 0
+    assert ledger.balance("尾号1234") == 0
+
+
+def test_income_with_account_default_fallback(ledger):
+    add_account(ledger, "尾号1234")
+    record_draft(ledger, {"type": "income", "category": "工资", "amount": 23000, "account": "尾号1234", "note": "工资"}, "2026-11-05", "r1")
+    # account 不填 → 落到默认账户「现金」
+    record_draft(ledger, {"type": "income", "category": "理财", "amount": 100, "note": ""}, "2026-11-06", "r2")
+    assert ledger.balance("尾号1234") == 23000
+    assert ledger.balance("现金") == 100
+
+
+def test_transfer_moves_balance_not_pnl(ledger):
+    add_account(ledger, "尾号1234")
+    add_account(ledger, "支付宝")
+    record_draft(ledger, {"type": "income", "category": "工资", "amount": 23000, "account": "尾号1234", "note": ""}, "2026-11-05", "r0")
+    r = record_draft(ledger, {"type": "transfer", "from_account": "尾号1234", "to_account": "支付宝", "amount": 2000, "note": "转零花"}, "2026-11-06", "t1")
+    assert r["posted"]
+    assert ledger.balance("尾号1234") == 21000
+    assert ledger.balance("支付宝") == 2000
+    # 转账不计收支：收入仍是 23000，支出 0
+    assert ledger.month_pnl("2026-11") == {"income": 23000.0, "expense": 0.0, "net": 23000.0}
+    assert "expense:" not in str(ledger.month_pnl_by_account("2026-11"))
+    d, c = ledger.trial_balance()
+    assert d == c
+
+
+def test_transfer_same_account_rejected(ledger):
+    with pytest.raises(BookkeepingError):
+        record_draft(ledger, {"type": "transfer", "from_account": "现金", "to_account": "现金", "amount": 100, "note": ""}, "2026-11-06", "t1")
+
+
+def test_transfer_missing_account_rejected(ledger):
+    with pytest.raises(BookkeepingError):
+        record_draft(ledger, {"type": "transfer", "from_account": "不存在的卡", "to_account": "现金", "amount": 100, "note": ""}, "2026-11-06", "t2")
+
+
+def test_draft_with_unknown_account_rejected(ledger):
+    with pytest.raises(BookkeepingError):
+        record_draft(ledger, {"type": "expense", "category": "餐饮", "amount": 35, "account": "支付宝", "note": ""}, "2026-11-06", "x1")
+
+
+def test_account_validations(ledger):
+    with pytest.raises(BookkeepingError):  # 空名
+        add_account(ledger, "  ")
+    with pytest.raises(BookkeepingError):  # 与分类账户冲突的前缀
+        add_account(ledger, "expense:餐饮")
+    add_account(ledger, "微信")
+    with pytest.raises(BookkeepingError):  # 重复
+        add_account(ledger, "微信")
+
+
+def test_remove_account_rules(ledger):
+    add_account(ledger, "支付宝")
+    record_draft(ledger, {"type": "expense", "category": "娱乐", "amount": 40, "account": "支付宝", "note": ""}, "2026-11-06", "r1")
+    with pytest.raises(BookkeepingError):  # 有流水（余额不为 0）不能删
+        remove_account(ledger, "支付宝")
+    add_account(ledger, "零钱通")
+    remove_account(ledger, "零钱通")  # 余额为 0 可删
+    assert "零钱通" not in accounts_list(ledger)
+    # 删到只剩一个（有流水的支付宝）时不能再删
+    remove_account(ledger, "现金")
+    with pytest.raises(BookkeepingError):
+        remove_account(ledger, "支付宝")
+
+
+def test_default_account_switch(ledger):
+    add_account(ledger, "尾号1234")
+    set_default_account(ledger, "尾号1234")
+    assert default_account(ledger) == "尾号1234"
+    assert accounts_list(ledger)[0] == "尾号1234"  # 默认排最前
+    record_draft(ledger, {"type": "expense", "category": "餐饮", "amount": 10, "note": ""}, "2026-11-06", "r1")
+    assert ledger.balance("尾号1234") == -10
+
+
+def test_account_balances_total(ledger):
+    add_account(ledger, "支付宝")
+    record_draft(ledger, {"type": "income", "category": "工资", "amount": 1000, "account": "支付宝", "note": ""}, "2026-11-05", "r1")
+    record_draft(ledger, {"type": "expense", "category": "餐饮", "amount": 30, "note": ""}, "2026-11-06", "r2")  # 默认 现金
+    b = account_balances(ledger)
+    assert b["支付宝"] == 1000
+    assert b["现金"] == -30
+    assert b["__total__"] == 970
+
+
+def test_migrate_cash_account(tmp_path):
+    # 模拟 v2 老库：entries 记在 cash 上
+    lg = Ledger(tmp_path / "old.db", initial_capital=0)
+    lg.ensure_account("cash", "asset")
+    lg.ensure_account("expense:餐饮", "expense")
+    lg.post("e1", "2026-11-01", "午饭", [("expense:餐饮", 35, 0), ("cash", 0, 35)])
+    migrate_cash_account(lg)
+    assert "现金" in lg.accounts() and "cash" not in lg.accounts()
+    assert lg.balance("现金") == -35
+    assert accounts_list(lg) == ["现金"]
+    migrate_cash_account(lg)  # 幂等
+    assert lg.balance("现金") == -35
+    lg.close()

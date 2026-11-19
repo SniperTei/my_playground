@@ -8,12 +8,23 @@ PARSE_SYSTEM_TEMPLATE = """你是一个个人记账解析器。把用户的一�
 
 输出 schema（金额为数字，单位元）：
 {{
-  "type": "income | expense",
-  "category": "内置分类之一",
+  "type": "income | expense | transfer",
+  "category": "内置分类之一（transfer 时为 null）",
   "amount": 金额数字,
+  "account": "资金账户名或 null（见下方账户列表；没提账户就 null）",
+  "from_account": "仅 transfer：转出账户",
+  "to_account": "仅 transfer：转入账户",
   "date": "YYYY-MM-DD 或 null（没提日期就 null）",
   "note": "原话摘要"
 }}
+
+用户的资金账户（account/from_account/to_account 只能从中选）：
+{accounts}
+
+账户规则：
+- 提到从哪付/收：「支付宝买的」「微信收的」「从尾号2345的卡扣的」→ account 填对应账户。
+- 没提账户 → account 填 null（默认账户），不要猜。
+- 转账：「从A转/划/冲了X到B」「A转B 1000」→ type=transfer，from_account=A，to_account=B，category=null。发工资到某卡、余额宝收益属于 income 不是转账。
 
 一句话里有几笔就输出几笔：
 - 只有一笔 → 输出单个对象
@@ -61,6 +72,15 @@ PARSE_SYSTEM_TEMPLATE = """你是一个个人记账解析器。把用户的一�
 "发工资了2万3"
 → {{"type":"income","category":"工资","amount":23000,"date":null,"note":"发工资"}}
 
+"工资到账，尾号1234的卡进了2万3"
+→ {{"type":"income","category":"工资","amount":23000,"account":"尾号1234","date":null,"note":"工资到账尾号1234"}}
+
+"支付宝买了张电影票40"
+→ {{"type":"expense","category":"娱乐","amount":40,"account":"支付宝","date":null,"note":"支付宝买电影票"}}
+
+"从尾号1234的卡转了1000到支付宝"
+→ {{"type":"transfer","category":null,"amount":1000,"account":null,"from_account":"尾号1234","to_account":"支付宝","date":null,"note":"卡转支付宝1000"}}
+
 "朋友随礼500"
 → {{"type":"expense","category":"人情","amount":500,"date":null,"note":"朋友随礼"}}
 
@@ -81,10 +101,15 @@ PARSE_SYSTEM_TEMPLATE = """你是一个个人记账解析器。把用户的一�
 """
 
 
-def parse_system(today: str | None = None, cats: dict[str, list[str]] | None = None) -> str:
-    """组装解析提示词：注入今天的日期和星期，供相对日期（昨天/上周X）换算。
+def parse_system(
+    today: str | None = None,
+    cats: dict[str, list[str]] | None = None,
+    accounts: list[str] | None = None,
+) -> str:
+    """组装解析提示词：注入今天的日期和星期、分类表、资金账户列表。
 
     cats: {expense: [...], income: [...]}，含自定义分类；不传则只有内置。
+    accounts: 资金账户名列表；不传则不注入账户示例（AI 只会填 null）。
     """
     from app.bookkeeping import builtin_categories
 
@@ -103,6 +128,7 @@ def parse_system(today: str | None = None, cats: dict[str, list[str]] | None = N
         weekday_cn=weekday_cn,
         expense_cats=_fmt("expense"),
         income_cats=_fmt("income"),
+        accounts="、".join(accounts or ["（用户还没设置账户）"]),
     )
 
 ASK_SYSTEM = """你是一个贴心的个人记账助手。根据下面提供的账本数据回答用户的问题。

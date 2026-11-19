@@ -20,11 +20,18 @@ from pydantic import BaseModel
 from . import llm, prompts
 from .bookkeeping import (
     BookkeepingError,
+    account_balances,
+    accounts_list,
+    add_account,
     add_category,
     categories,
     category_account,
+    default_account,
+    migrate_cash_account,
     record_draft,
+    remove_account,
     remove_category,
+    set_default_account,
     void_transaction,
 )
 from .ledger import Ledger
@@ -33,7 +40,8 @@ DB_PATH = os.environ.get("BOOKS_DB", Path(__file__).resolve().parent.parent / "d
 INITIAL_CASH = float(os.environ.get("BOOKS_INITIAL_CASH", "0"))
 
 ledger = Ledger(DB_PATH, initial_capital=INITIAL_CASH)
-_lock = threading.Lock()  # SQLite 单连接，写操作串行化
+migrate_cash_account(ledger)  # v2 老库 cash → 现金；种默认账户
+_lock = threading.RLock()  # SQLite 单连接，写操作串行化（可重入：端点内调用 get_accounts 等不再自锁）
 
 app = FastAPI(title="一句话账本")
 
@@ -77,39 +85,51 @@ def _report(month: str) -> dict:
         categories[t][cat] = amount
     last = _prev_month(month)
     last_net = ledger.month_pnl(last)["net"]
+    balances = account_balances(ledger)
     return {
         "month": month,
         "income": pnl["income"],
         "expense": pnl["expense"],
         "net": pnl["net"],
         "categories": categories,
-        "cash": ledger.balance("cash"),
+        "accounts": {k: v for k, v in balances.items() if k != "__total__"},
+        "total": balances.get("__total__", 0.0),
+        "acct_default": default_account(ledger),
         "last_month": {"month": last, "net": last_net},
         "mom_diff": round(pnl["net"] - last_net, 2),
     }
 
 
 def _find_duplicate(date: str, draft: dict) -> dict | None:
-    """同日同 type+category+amount 的最近一笔（未被作废的）→ 防重复入账。"""
-    account = category_account(ledger, draft.get("type"), draft.get("category"))
+    """防重复：同日同 type+分类/转出转入+金额+账户 的最近一笔（未被作废的）。"""
+    t = draft.get("type")
     amount = round(float(draft["amount"]), 2)
-    # expense 记在分类账户借方，income 记在贷方
-    side = "p.debit" if draft["type"] == "expense" else "p.credit"
-    row = ledger.conn.execute(
-        f"""
-        SELECT t.id, t.date, t.memo, t.draft FROM transactions t
-        JOIN postings p ON p.txn_id = t.id
-        WHERE t.date = ? AND p.account = ? AND {side} = ?
-          AND NOT EXISTS (SELECT 1 FROM transactions v WHERE v.ref_id = 'void-' || t.id)
-        ORDER BY t.id DESC LIMIT 1
-        """,
-        (date, account, amount),
-    ).fetchone()
-    if row is None:
+    if t not in ("income", "expense", "transfer"):
         return None
+    rows = ledger.conn.execute(
+        """
+        SELECT t.id, t.date, t.memo, t.draft FROM transactions t
+        WHERE t.date = ? AND t.ref_id NOT LIKE 'void-%'
+          AND NOT EXISTS (SELECT 1 FROM transactions v WHERE v.ref_id = 'void-' || t.id)
+        ORDER BY t.id DESC
+        """,
+        (date,),
+    ).fetchall()
     import json as _json
 
-    return {"id": row["id"], "date": row["date"], "memo": row["memo"], "draft": _json.loads(row["draft"] or "{}")}
+    def norm_account(a: str | None) -> str:
+        return (a or "").strip() or (default_account(ledger) or "")
+
+    for r in rows:
+        d = _json.loads(r["draft"] or "{}")
+        if d.get("type") != t or round(float(d.get("amount") or 0), 2) != amount:
+            continue
+        if t == "transfer":
+            if d.get("from_account") == draft.get("from_account") and d.get("to_account") == draft.get("to_account"):
+                return {"id": r["id"], "date": r["date"], "memo": r["memo"], "draft": d}
+        elif d.get("category") == draft.get("category") and norm_account(d.get("account")) == norm_account(draft.get("account")):
+            return {"id": r["id"], "date": r["date"], "memo": r["memo"], "draft": d}
+    return None
 
 
 @app.post("/api/parse")
@@ -120,7 +140,8 @@ def parse(req: ParseReq):
     try:
         with _lock:
             cats = categories(ledger)
-        draft = llm.chat_json(prompts.parse_system(cats=cats), text)
+            accts = accounts_list(ledger)
+        draft = llm.chat_json(prompts.parse_system(cats=cats, accounts=accts), text)
     except RuntimeError as e:  # no API key
         raise HTTPException(503, str(e))
     except Exception as e:
@@ -182,6 +203,51 @@ def ask(req: AskReq):
     return {"answer": answer, "report": this_month}
 
 
+@app.get("/api/accounts")
+def get_accounts():
+    with _lock:
+        return {
+            "accounts": accounts_list(ledger),
+            "default": default_account(ledger),
+            "balances": {k: v for k, v in account_balances(ledger).items() if k != "__total__"},
+            "total": account_balances(ledger).get("__total__", 0.0),
+        }
+
+
+class AccountReq(BaseModel):
+    name: str
+
+
+@app.post("/api/accounts")
+def post_account(req: AccountReq):
+    try:
+        with _lock:
+            add_account(ledger, req.name)
+            return get_accounts()
+    except BookkeepingError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.delete("/api/accounts/{name}")
+def delete_account(name: str):
+    try:
+        with _lock:
+            remove_account(ledger, name)
+            return get_accounts()
+    except BookkeepingError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.post("/api/accounts/{name}/default")
+def set_account_default(name: str):
+    try:
+        with _lock:
+            set_default_account(ledger, name)
+            return get_accounts()
+    except BookkeepingError as e:
+        raise HTTPException(422, str(e))
+
+
 @app.get("/api/categories")
 def get_categories():
     with _lock:
@@ -228,20 +294,25 @@ def export(month: str | None = None):
     """CSV 导出（UTF-8 + BOM，Excel 打开中文不乱码）。"""
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["日期", "类型", "分类", "金额", "备注", "状态"])
+    writer.writerow(["日期", "类型", "分类", "金额", "账户", "转出", "转入", "备注", "状态"])
     with _lock:
         for e in ledger.entries(month):
             if e["ref_id"].startswith("void-"):
                 continue  # 反转分录不导出，原交易标「已作废」
             d = e["draft"]
-            if d.get("type") in ("income", "expense"):
+            t = d.get("type")
+            if t == "transfer":
+                writer.writerow([e["date"], "转账", "", d.get("amount", ""), "",
+                                 d.get("from_account", ""), d.get("to_account", ""),
+                                 d.get("note") or e["memo"], "已作废" if e["voided"] else "正常"])
+            elif t in ("income", "expense"):
                 writer.writerow([
-                    e["date"], "收入" if d["type"] == "income" else "支出",
-                    d.get("category", ""), d.get("amount", ""),
-                    d.get("note") or e["memo"], "已作废" if e["voided"] else "正常",
+                    e["date"], "收入" if t == "income" else "支出",
+                    d.get("category", ""), d.get("amount", ""), d.get("account", ""),
+                    "", "", d.get("note") or e["memo"], "已作废" if e["voided"] else "正常",
                 ])
             else:
-                writer.writerow([e["date"], "", "", "", e["memo"], "已作废" if e["voided"] else "正常"])
+                writer.writerow([e["date"], "", "", "", "", "", "", e["memo"], "已作废" if e["voided"] else "正常"])
     filename = f"books{'-' + month if month else ''}.csv"
     return Response(
         content="\ufeff" + buf.getvalue(),
