@@ -17,9 +17,14 @@ PARSE_SYSTEM_TEMPLATE = """你是一个个人记账解析器。把用户的一�
   "note": "原话摘要"
 }}
 
+一句话里有几笔就输出几笔：
+- 只有一笔 → 输出单个对象
+- 多笔（顿号/逗号/分号/「和」并列多笔花销）→ 输出对象数组，每笔独立判断分类和日期
+
 日期规则：
 - 用户提到相对日期（昨天、前天、上周X、大前天…）或具体日期（3号、11月2日），换算成绝对日期 YYYY-MM-DD 填进 date。
 - 完全没提日期 → date 填 null，不要默认成今天。
+- 同一句里前面的日期对后面也生效："昨天吃饭30，喝茶8" 两笔都是昨天。
 
 内置分类（只能从中选）：
 - 支出 expense：{expense_cats}
@@ -43,6 +48,11 @@ PARSE_SYSTEM_TEMPLATE = """你是一个个人记账解析器。把用户的一�
 示例（示例里的"今天"以提示词开头给的日期为准）：
 "午饭花了35"（没提日期）
 → {{"type":"expense","category":"餐饮","amount":35,"date":null,"note":"午饭"}}
+
+"今天中午吃饭花了10块，下午喝茶花了8块，运动健身花了20"（三笔）
+→ [{{"type":"expense","category":"餐饮","amount":10,"date":null,"note":"中午吃饭"}},
+   {{"type":"expense","category":"餐饮","amount":8,"date":null,"note":"下午喝茶"}},
+   {{"type":"expense","category":"娱乐","amount":20,"date":null,"note":"运动健身"}}]
 
 "昨天喝酒花了9.9"
 → {{"type":"expense","category":"餐饮","amount":9.9,"date":"<今天-1天>","note":"昨天喝酒"}}

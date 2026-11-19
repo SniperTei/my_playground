@@ -64,6 +64,7 @@
   .err { color: var(--bad); font-size: 13px; margin-top: 8px; line-height: 1.6; }
 
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .dcard { border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 10px; }
   .field label { display: block; font-size: 12px; color: var(--sub); margin-bottom: 4px; }
   .field input, .field select {
     width: 100%; border: 1px solid var(--line); border-radius: 8px;
@@ -124,21 +125,11 @@
       <div class="err" id="parseErr"></div>
     </div>
     <div class="box" id="draftCard" style="display:none">
-      <h3 class="sec">草稿 · 核对后入账（可改）</h3>
-      <div class="grid">
-        <div class="field"><label>类型</label>
-          <select id="d_type" onchange="fillCategories()">
-            <option value="expense">支出</option><option value="income">收入</option>
-          </select></div>
-        <div class="field"><label>日期</label><input type="date" id="d_date"></div>
-        <div class="field"><label>分类</label><select id="d_category"></select></div>
-        <div class="field"><label>金额</label><input id="d_amount" inputmode="decimal"></div>
-        <div class="field wide"><label>备注</label><input id="d_note"></div>
-      </div>
+      <h3 class="sec" id="draftTitle">草稿 · 核对后入账（可改）</h3>
+      <div id="draftList"></div>
       <div style="height:12px"></div>
-      <button class="btn" id="recordBtn" onclick="doRecord(false)">确认入账</button>
+      <button class="btn" id="recordBtn" onclick="doRecordAll()">全部入账</button>
       <div class="err" id="recordErr"></div>
-      <div class="lines" id="recordOk"></div>
     </div>
   </section>
 
@@ -193,15 +184,49 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
 });
 
 const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
-let draft = null;
-$('d_date').value = todayStr();
+let drafts = [];  // [{type,category,amount,date,note,status:'new'|'dup'|'ok',warn}]
 $('emonth').value = $('rmonth').value = todayStr().slice(0, 7);
-fillCategories();
 
-function fillCategories() {
-  const t = $('d_type').value, sel = $('d_category'), cur = sel.value;
-  sel.innerHTML = CATS[t].map(c => `<option value="${c}">${c}</option>`).join('');
-  if (CATS[t].includes(cur)) sel.value = cur;
+function esc(s) { return String(s ?? '').replace(/</g, '&lt;').replace(/"/g, '&quot;'); }
+
+function renderDrafts() {
+  $('draftTitle').textContent = drafts.length > 1 ? `草稿 · ${drafts.length} 笔，核对后入账（可改）` : '草稿 · 核对后入账（可改）';
+  $('draftList').innerHTML = drafts.map((d, i) => {
+    const catOpts = cur => CATS[d.type].map(c => `<option value="${c}" ${c === cur ? 'selected' : ''}>${c}</option>`).join('');
+    const status = d.status === 'ok' ? '<span class="voidmark" style="color:var(--ok);background:#f0fdf4">✅ 已入账</span>'
+      : d.status === 'dup' ? `<span class="voidmark">⚠️ 疑似重复</span>` : '';
+    return `<div class="dcard" style="opacity:${d.status === 'ok' ? .55 : 1}">
+      ${drafts.length > 1 || d.status !== 'new' ? `<div style="display:flex;justify-content:space-between;margin-bottom:8px"><span class="sec" style="font-size:12px;color:var(--sub)">第 ${i + 1} 笔</span>${status}</div>` : ''}
+      <div class="grid">
+        <div class="field"><label>类型</label>
+          <select onchange="updDraft(${i},'type',this.value)">
+            <option value="expense" ${d.type === 'expense' ? 'selected' : ''}>支出</option>
+            <option value="income" ${d.type === 'income' ? 'selected' : ''}>收入</option>
+          </select></div>
+        <div class="field"><label>日期</label><input type="date" value="${esc(d.date || todayStr())}" onchange="updDraft(${i},'date',this.value)"></div>
+        <div class="field"><label>分类</label><select onchange="updDraft(${i},'category',this.value)">${catOpts(d.category)}</select></div>
+        <div class="field"><label>金额</label><input inputmode="decimal" value="${esc(d.amount ?? '')}" oninput="updDraft(${i},'amount',this.value === '' ? null : Number(this.value))"></div>
+        <div class="field wide"><label>备注</label><input value="${esc(d.note || '')}" oninput="updDraft(${i},'note',this.value)"></div>
+      </div>
+      ${d.warn ? `<div class="err" style="margin-top:6px">${esc(d.warn)}</div>` : ''}
+    </div>`;
+  }).join('');
+  updateRecordBtn();
+}
+
+function updDraft(i, field, value) {
+  const d = drafts[i];
+  d[field] = value;
+  if (field === 'type' && !CATS[d.type].includes(d.category)) d.category = '其他';
+  renderDrafts();
+}
+
+function updateRecordBtn() {
+  const btn = $('recordBtn');
+  const dups = drafts.filter(d => d.status === 'dup').length;
+  const done = drafts.every(d => d.status === 'ok');
+  btn.disabled = done;
+  btn.textContent = done ? '已全部入账' : dups ? `忽略提醒，${dups} 笔仍要入账` : (drafts.length > 1 ? `全部入账（${drafts.length} 笔）` : '确认入账');
 }
 
 async function api(path, body) {
@@ -242,9 +267,9 @@ function toggleMic() {
   try { recog.start(); } catch (e) { recording = false; $('micBtn').classList.remove('rec'); }
 }
 
-/* ---- 记一笔 ---- */
+/* ---- 记一笔（支持一句多笔） ---- */
 async function doParse() {
-  $('parseErr').textContent = ''; $('recordErr').textContent = ''; $('recordOk').textContent = '';
+  $('parseErr').textContent = ''; $('recordErr').textContent = '';
   const text = $('say').value.trim();
   if (!text) return;
   $('parseBtn').disabled = true; $('parseBtn').textContent = 'AI 正在听…';
@@ -255,14 +280,19 @@ async function doParse() {
       $('draftCard').style.display = 'none';
       return;
     }
-    draft = d;
-    $('d_type').value = d.type === 'income' ? 'income' : 'expense';
-    fillCategories();
-    $('d_category').value = CATS[$('d_type').value].includes(d.category) ? d.category : '其他';
-    if (d.date) $('d_date').value = d.date;  // AI 换算出的绝对日期（昨天/上周X…）
-    $('d_amount').value = d.amount ?? '';
-    $('d_note').value = d.note || '';
-    $('recordBtn').textContent = '确认入账';
+    const list = Array.isArray(d) ? d : [d];  // 一句多笔 → 数组
+    drafts = list.map(x => {
+      const type = x.type === 'income' ? 'income' : 'expense';
+      return {
+        type,
+        category: CATS[type].includes(x.category) ? x.category : '其他',
+        amount: x.amount ?? null,
+        date: x.date || todayStr(),  // AI 换算出的绝对日期（昨天/上周X…），没提默认今天
+        note: x.note || '',
+        status: 'new', warn: '',
+      };
+    });
+    renderDrafts();
     $('draftCard').style.display = '';
     $('draftCard').scrollIntoView({behavior: 'smooth'});
   } catch (e) {
@@ -272,36 +302,34 @@ async function doParse() {
   }
 }
 
-function collectDraft() {
-  return {
-    type: $('d_type').value,
-    category: $('d_category').value,
-    amount: $('d_amount').value === '' ? null : Number($('d_amount').value),
-    note: $('d_note').value.trim() || null,
-  };
-}
-
-async function doRecord(force) {
-  $('recordErr').textContent = ''; $('recordOk').textContent = '';
+async function doRecordAll() {
+  $('recordErr').textContent = '';
   $('recordBtn').disabled = true;
-  try {
-    const r = await api('/api/record', {draft: collectDraft(), date: $('d_date').value, force: !!force});
-    const lines = r.lines.map(l =>
-      `${l.account} ${l.debit ? '↑' + fmt(l.debit) : '↓' + fmt(l.credit)}`).join('　');
-    $('recordOk').innerHTML = `✅ 已入账：${r.memo}<br>${lines}`;
-    $('say').value = ''; $('draftCard').style.display = 'none';
-    $('d_date').value = todayStr();  // 日期复位，别把「昨天」带到下一笔
-    $('recordBtn').textContent = '确认入账';
-  } catch (e) {
-    if (e.detail && e.detail.duplicate) {
-      $('recordErr').textContent = '⚠️ ' + e.detail.message;
-      $('recordBtn').textContent = '不是重复，仍然入账';
-      $('recordBtn').onclick = () => doRecord(true);
-      setTimeout(() => { $('recordBtn').onclick = () => doRecord(false); $('recordBtn').textContent = '确认入账'; }, 15000);
-    } else {
-      $('recordErr').textContent = '🤔 ' + e.message;
+  const errors = [];
+  for (let i = 0; i < drafts.length; i++) {
+    const d = drafts[i];
+    if (d.status === 'ok') continue;
+    try {
+      await api('/api/record', {
+        draft: {type: d.type, category: d.category, amount: d.amount, note: d.note},
+        date: d.date,
+        force: d.status === 'dup',  // 疑似重复的这轮强制入账
+      });
+      drafts[i] = {...d, status: 'ok', warn: ''};
+    } catch (e) {
+      if (e.detail && e.detail.duplicate) {
+        drafts[i] = {...d, status: 'dup', warn: e.detail.message};
+      } else {
+        errors.push(`第 ${i + 1} 笔：${e.message}`);
+      }
     }
-  } finally {
+  }
+  renderDrafts();
+  $('recordErr').textContent = errors.length ? '🤔 ' + errors.join('；') : '';
+  if (drafts.every(d => d.status === 'ok')) {
+    $('say').value = '';
+    setTimeout(() => { $('draftCard').style.display = 'none'; drafts = []; }, 1200);
+  } else {
     $('recordBtn').disabled = false;
   }
 }
