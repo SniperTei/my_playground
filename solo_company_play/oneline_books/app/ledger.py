@@ -181,9 +181,12 @@ class Ledger:
         return result
 
     def entries(self, month: str | None = None) -> list[dict]:
-        """Transaction list (newest first), optionally filtered to YYYY-MM."""
+        """Transaction list (newest first), optionally filtered to YYYY-MM.
+
+        每笔带 draft（原始 AI 草稿）和 voided（是否已被作废反转）。
+        """
         sql = (
-            "SELECT t.id, t.ref_id, t.date, t.memo, p.account, p.debit, p.credit "
+            "SELECT t.id, t.ref_id, t.date, t.memo, t.draft, p.account, p.debit, p.credit "
             "FROM transactions t JOIN postings p ON p.txn_id = t.id"
         )
         params: tuple = ()
@@ -192,11 +195,64 @@ class Ledger:
             params = (month + "-%",)
         sql += " ORDER BY t.id DESC, p.id"
         rows = self.conn.execute(sql, params).fetchall()
+        void_refs = {
+            r["ref_id"] for r in self.conn.execute("SELECT ref_id FROM transactions WHERE ref_id LIKE 'void-%'").fetchall()
+        }
         by_txn: dict[int, dict] = {}
         for r in rows:
-            txn = by_txn.setdefault(r["id"], {"id": r["id"], "ref_id": r["ref_id"], "date": r["date"], "memo": r["memo"], "lines": []})
+            txn = by_txn.setdefault(r["id"], {
+                "id": r["id"], "ref_id": r["ref_id"], "date": r["date"], "memo": r["memo"],
+                "draft": json.loads(r["draft"] or "{}"), "voided": f"void-{r['id']}" in void_refs,
+                "lines": [],
+            })
             txn["lines"].append({"account": r["account"], "debit": r["debit"], "credit": r["credit"]})
         return list(by_txn.values())
+
+    def transaction(self, txn_id: int) -> dict | None:
+        """单笔交易（分录 + draft），作废时读原分录用。"""
+        row = self.conn.execute(
+            "SELECT id, ref_id, date, memo, draft FROM transactions WHERE id=?",
+            (txn_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        posts = self.conn.execute(
+            "SELECT account, debit, credit FROM postings WHERE txn_id=? ORDER BY id",
+            (txn_id,),
+        ).fetchall()
+        return {
+            "id": row["id"],
+            "ref_id": row["ref_id"],
+            "date": row["date"],
+            "memo": row["memo"],
+            "draft": json.loads(row["draft"] or "{}"),
+            "lines": [
+                {"account": p["account"], "debit": p["debit"], "credit": p["credit"]}
+                for p in posts
+            ],
+        }
+
+    def month_pnl_by_account(self, month: str) -> dict[str, dict[str, float]]:
+        """按复式账户（= 分类）汇总月度收支：{'expense:餐饮': 350.0, 'income:工资': 23000.0}。
+
+        金额取自然方向正值（expense 取借方余额，income 取贷方余额的相反数）。
+        """
+        like = month + "-%"
+        rows = self.conn.execute(
+            "SELECT p.account, SUM(p.debit) - SUM(p.credit) AS bal "
+            "FROM postings p JOIN transactions t ON p.txn_id = t.id "
+            "WHERE t.date LIKE ? GROUP BY p.account",
+            (like,),
+        ).fetchall()
+        types = self.accounts()
+        result: dict[str, float] = {}
+        for r in rows:
+            type_ = types.get(r["account"], "")
+            if type_ == "expense" and r["bal"] != 0:
+                result[r["account"]] = round(r["bal"], 2)
+            elif type_ == "income" and r["bal"] != 0:
+                result[r["account"]] = round(-r["bal"], 2)
+        return result
 
     def ar_ap_detail(self) -> dict[str, dict[str, float]]:
         """Outstanding AR (who owes me) and AP (whom I owe), by counterparty."""

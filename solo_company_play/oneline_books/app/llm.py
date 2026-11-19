@@ -49,13 +49,16 @@ def chat_json(system: str, user: str) -> dict:
     return json.loads(content)
 
 
-def chat_text(system: str, user: str) -> str:
+def chat_text(system: str, user: str, history: list[dict] | None = None) -> str:
+    """多轮对话：history 为 [{"role": "user"|"assistant", "content": str}, ...]。"""
+    messages: list[dict] = [{"role": "system", "content": system}]
+    for m in history or []:
+        if m.get("role") in ("user", "assistant") and m.get("content"):
+            messages.append({"role": m["role"], "content": m["content"]})
+    messages.append({"role": "user", "content": user})
     resp = client().chat.completions.create(
         model=MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+        messages=messages,
         temperature=0.3,
     )
     return resp.choices[0].message.content or ""

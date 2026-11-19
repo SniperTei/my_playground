@@ -58,3 +58,47 @@ def test_fifo_positions_with_dates(ledger):
     assert basis == 350.0  # 100×2 + 50×3
     remain = ledger.open_positions("goods")
     assert len(remain) == 1 and remain[0]["qty"] == 50 and remain[0]["unit_cost"] == 3.0
+
+
+def test_transaction_returns_lines_and_draft(ledger):
+    ledger.ensure_account("cash", "asset")
+    ledger.ensure_account("expense:餐饮", "expense")
+    txn_id = ledger.post(
+        "t1", "2026-11-06", "午饭",
+        [("expense:餐饮", 35, 0), ("cash", 0, 35)],
+        draft={"type": "expense", "category": "餐饮", "amount": 35, "note": "午饭"},
+    )
+    t = ledger.transaction(txn_id)
+    assert t["memo"] == "午饭"
+    assert t["draft"]["category"] == "餐饮"
+    assert {"account": "expense:餐饮", "debit": 35.0, "credit": 0.0} in t["lines"]
+    assert {"account": "cash", "debit": 0.0, "credit": 35.0} in t["lines"]
+    assert ledger.transaction(999) is None
+
+
+def test_month_pnl_by_account(ledger):
+    ledger.ensure_account("cash", "asset")
+    ledger.ensure_account("expense:餐饮", "expense")
+    ledger.ensure_account("income:工资", "income")
+    ledger.post("e1", "2026-11-01", "午饭", [("expense:餐饮", 35, 0), ("cash", 0, 35)])
+    ledger.post("i1", "2026-11-05", "工资", [("cash", 23000, 0), ("income:工资", 0, 23000)])
+    by_acct = ledger.month_pnl_by_account("2026-11")
+    assert by_acct == {"expense:餐饮": 35.0, "income:工资": 23000.0}
+    assert ledger.month_pnl_by_account("2026-10") == {}
+
+
+def test_entries_carry_draft_and_voided_flag(ledger):
+    ledger.ensure_account("cash", "asset")
+    ledger.ensure_account("expense:餐饮", "expense")
+    txn_id = ledger.post(
+        "e1", "2026-11-01", "午饭",
+        [("expense:餐饮", 35, 0), ("cash", 0, 35)],
+        draft={"type": "expense", "category": "餐饮", "amount": 35, "note": "午饭"},
+    )
+    ents = ledger.entries("2026-11")
+    assert ents[0]["draft"]["category"] == "餐饮"
+    assert ents[0]["voided"] is False
+    # 作废（反转）后，原交易标 voided
+    ledger.post(f"void-{txn_id}", "2026-11-02", "作废", [("cash", 35, 0), ("expense:餐饮", 0, 35)])
+    ents = {e["id"]: e for e in ledger.entries("2026-11")}
+    assert ents[txn_id]["voided"] is True

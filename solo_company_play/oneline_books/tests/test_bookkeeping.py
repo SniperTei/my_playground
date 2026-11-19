@@ -1,171 +1,143 @@
 import pytest
 
-from app.bookkeeping import BookkeepingError, record_draft
+from app.bookkeeping import (
+    BookkeepingError,
+    EXPENSE_CATEGORIES,
+    INCOME_CATEGORIES,
+    record_draft,
+    void_transaction,
+)
 from app.ledger import Ledger
 
 
 @pytest.fixture()
 def ledger(tmp_path):
-    lg = Ledger(tmp_path / "t.db", initial_capital=10000)
+    lg = Ledger(tmp_path / "t.db", initial_capital=0)
     yield lg
     lg.close()
 
 
-def test_buy_full_payment(ledger):
-    r = record_draft(ledger, {
-        "type": "buy", "counterparty": None, "goods": "纸箱", "qty": 500,
-        "unit_price": 2.8, "amount": 1400, "paid_amount": 1400, "note": "进纸箱付全款",
-    }, "2026-11-01", "r1")
+def test_expense_entry(ledger):
+    r = record_draft(ledger, {"type": "expense", "category": "餐饮", "amount": 35, "note": "午饭"}, "2026-11-06", "r1")
     assert r["posted"]
     lines = {(l["account"], l["debit"], l["credit"]) for l in r["lines"]}
-    assert ("inventory", 1400.0, 0.0) in lines
-    assert ("cash", 0.0, 1400.0) in lines
-    assert ledger.balance("cash") == 10000 - 1400
+    assert ("expense:餐饮", 35.0, 0.0) in lines
+    assert ("cash", 0.0, 35.0) in lines
+    assert ledger.balance("cash") == -35
 
 
-def test_buy_partial_payment_creates_ap(ledger):
-    record_draft(ledger, {
-        "type": "buy", "counterparty": "老王", "goods": "缠绕膜", "qty": None,
-        "unit_price": None, "amount": 5600, "paid_amount": 3000, "note": "",
-    }, "2026-11-02", "r2")
-    assert ledger.balance("inventory") == 5600
-    assert ledger.ar_ap_detail()["ap"] == {"老王": 2600.0}
-    assert ledger.balance("cash") == 10000 - 3000
+def test_income_entry(ledger):
+    r = record_draft(ledger, {"type": "income", "category": "工资", "amount": 23000, "note": "发工资"}, "2026-11-05", "r1")
+    assert r["posted"]
+    lines = {(l["account"], l["debit"], l["credit"]) for l in r["lines"]}
+    assert ("cash", 23000.0, 0.0) in lines
+    assert ("income:工资", 0.0, 23000.0) in lines
+    assert ledger.balance("cash") == 23000
 
 
-def test_buy_unpaid_without_supplier_asked(ledger):
-    with pytest.raises(BookkeepingError) as e:
-        record_draft(ledger, {
-            "type": "buy", "counterparty": None, "goods": "纸箱", "qty": 100,
-            "unit_price": 2.0, "amount": 200, "paid_amount": None, "note": "",
-        }, "2026-11-01", "r3")
-    assert "供应商" in str(e.value)
+def test_category_accounts_tracked(ledger):
+    record_draft(ledger, {"type": "expense", "category": "餐饮", "amount": 35, "note": "午饭"}, "2026-11-01", "a")
+    record_draft(ledger, {"type": "expense", "category": "餐饮", "amount": 28, "note": "午饭"}, "2026-11-02", "b")
+    record_draft(ledger, {"type": "expense", "category": "交通", "amount": 28, "note": "打车"}, "2026-11-02", "c")
+    record_draft(ledger, {"type": "income", "category": "工资", "amount": 23000, "note": "工资"}, "2026-11-05", "d")
+    by_acct = ledger.month_pnl_by_account("2026-11")
+    assert by_acct["expense:餐饮"] == 63.0
+    assert by_acct["expense:交通"] == 28.0
+    assert by_acct["income:工资"] == 23000.0
 
 
-def test_sell_fifo_cogs(ledger):
-    # 两批进货不同成本，跨月卖，验证 FIFO
-    record_draft(ledger, {
-        "type": "buy", "counterparty": None, "goods": "纸箱", "qty": 100,
-        "unit_price": 2.0, "amount": 200, "paid_amount": 200, "note": "",
-    }, "2026-10-01", "b1")
-    record_draft(ledger, {
-        "type": "buy", "counterparty": None, "goods": "纸箱", "qty": 100,
-        "unit_price": 3.0, "amount": 300, "paid_amount": 300, "note": "",
-    }, "2026-10-15", "b2")
-    r = record_draft(ledger, {
-        "type": "sell", "counterparty": "宏发贸易", "goods": "纸箱", "qty": 150,
-        "unit_price": 4.0, "amount": 600, "paid_amount": 300, "note": "",
-    }, "2026-11-05", "s1")
-    # FIFO: 100×2 + 50×3 = 350
-    assert r["cogs"] == 350.0
-    assert ledger.month_pnl("2026-11") == {"income": 600.0, "expense": 350.0, "net": 250.0}
-    assert ledger.month_pnl("2026-10") == {"income": 0.0, "expense": 0.0, "net": 0.0}
+def test_validate_rejects_bad_type(ledger):
+    with pytest.raises(BookkeepingError):
+        record_draft(ledger, {"type": "buy", "category": "其他", "amount": 100, "note": ""}, "2026-11-01", "x1")
 
 
-def test_sell_deposit_creates_ar(ledger):
-    record_draft(ledger, {
-        "type": "buy", "counterparty": None, "goods": "纸箱", "qty": 500,
-        "unit_price": 2.8, "amount": 1400, "paid_amount": 1400, "note": "",
-    }, "2026-11-01", "b1")
-    record_draft(ledger, {
-        "type": "sell", "counterparty": "宏发贸易", "goods": "纸箱", "qty": 500,
-        "unit_price": 3.2, "amount": 1600, "paid_amount": 1000, "note": "",
-    }, "2026-11-03", "s1")
-    assert ledger.balance("ar:宏发贸易") == 600
-    assert ledger.balance("sales") == -1600  # credit-natural
-    # 毛利 = 1600 - 500*2.8 = 200
-    assert ledger.month_pnl("2026-11")["net"] == 200.0
+def test_validate_rejects_missing_amount(ledger):
+    with pytest.raises(BookkeepingError):
+        record_draft(ledger, {"type": "expense", "category": "餐饮", "amount": None, "note": ""}, "2026-11-01", "x1")
+    with pytest.raises(BookkeepingError):
+        record_draft(ledger, {"type": "expense", "category": "餐饮", "amount": 0, "note": ""}, "2026-11-01", "x2")
 
 
-def test_receipt_closes_ar(ledger):
-    record_draft(ledger, {
-        "type": "buy", "counterparty": None, "goods": "纸箱", "qty": 100,
-        "unit_price": 1.0, "amount": 100, "paid_amount": 100, "note": "",
-    }, "2026-11-01", "b1")
-    record_draft(ledger, {
-        "type": "sell", "counterparty": "宏发", "goods": "纸箱", "qty": 100,
-        "unit_price": 2.0, "amount": 200, "paid_amount": 0, "note": "",
-    }, "2026-11-02", "s1")
-    record_draft(ledger, {
-        "type": "receipt", "counterparty": "宏发", "goods": None, "qty": None,
-        "unit_price": None, "amount": 200, "paid_amount": None, "note": "宏发结款",
-    }, "2026-11-10", "rc1")
-    assert ledger.balance("ar:宏发") == 0
-    assert ledger.ar_ap_detail() == {"ar": {}, "ap": {}}
+def test_validate_rejects_category_outside_table(ledger):
+    with pytest.raises(BookkeepingError):
+        record_draft(ledger, {"type": "expense", "category": "工资", "amount": 100, "note": ""}, "2026-11-01", "x1")  # 收入分类配支出
+    with pytest.raises(BookkeepingError):
+        record_draft(ledger, {"type": "income", "category": "餐饮", "amount": 100, "note": ""}, "2026-11-01", "x2")
 
 
-def test_payment_closes_ap(ledger):
-    record_draft(ledger, {
-        "type": "buy", "counterparty": "老王", "goods": "膜", "qty": None,
-        "unit_price": None, "amount": 5600, "paid_amount": 3000, "note": "",
-    }, "2026-11-01", "b1")
-    record_draft(ledger, {
-        "type": "payment", "counterparty": "老王", "goods": None, "qty": None,
-        "unit_price": None, "amount": 2600, "paid_amount": None, "note": "",
-    }, "2026-11-09", "p1")
-    assert ledger.balance("ap:老王") == 0
+def test_validate_rejects_unknown_category(ledger):
+    with pytest.raises(BookkeepingError):
+        record_draft(ledger, {"type": "expense", "category": "宠物", "amount": 100, "note": ""}, "2026-11-01", "x1")
 
 
-def test_expense(ledger):
-    record_draft(ledger, {
-        "type": "expense", "counterparty": None, "goods": None, "qty": None,
-        "unit_price": None, "amount": 300, "paid_amount": 300, "note": "运费",
-    }, "2026-11-04", "e1")
-    assert ledger.balance("other_expense") == 300
-    assert ledger.month_pnl("2026-11")["expense"] == 300
+def test_validate_missing_category(ledger):
+    with pytest.raises(BookkeepingError):
+        record_draft(ledger, {"type": "expense", "category": None, "amount": 100, "note": ""}, "2026-11-01", "x1")
 
 
-def test_sell_service_no_goods_cogs_zero(ledger):
-    r = record_draft(ledger, {
-        "type": "sell", "counterparty": "宏发", "goods": None, "qty": None,
-        "unit_price": None, "amount": 800, "paid_amount": 800, "note": "搬运服务费",
-    }, "2026-11-05", "s2")
-    assert r["cogs"] == 0
-    assert ledger.month_pnl("2026-11")["net"] == 800
+def test_all_builtin_categories_accepted(ledger):
+    for i, cat in enumerate(EXPENSE_CATEGORIES):
+        record_draft(ledger, {"type": "expense", "category": cat, "amount": 1, "note": ""}, "2026-11-01", f"e{i}")
+    for i, cat in enumerate(INCOME_CATEGORIES):
+        record_draft(ledger, {"type": "income", "category": cat, "amount": 1, "note": ""}, "2026-11-01", f"i{i}")
+    assert len(ledger.month_pnl_by_account("2026-11")) == len(EXPENSE_CATEGORIES) + len(INCOME_CATEGORIES)
 
 
 def test_idempotent_ref(ledger):
-    d = {"type": "expense", "counterparty": None, "goods": None, "qty": None,
-         "unit_price": None, "amount": 100, "paid_amount": 100, "note": ""}
+    d = {"type": "expense", "category": "餐饮", "amount": 100, "note": ""}
     r1 = record_draft(ledger, d, "2026-11-01", "same-ref")
     r2 = record_draft(ledger, d, "2026-11-01", "same-ref")
     assert r1["posted"] and not r2["posted"]
-    assert ledger.balance("other_expense") == 100
+    assert ledger.balance("cash") == -100
 
 
-def test_sell_fifo_insufficient_raises_friendly(ledger):
-    record_draft(ledger, {
-        "type": "buy", "counterparty": None, "goods": "纸箱", "qty": 10,
-        "unit_price": 1.0, "amount": 10, "paid_amount": 10, "note": "",
-    }, "2026-11-01", "b1")
-    with pytest.raises(BookkeepingError) as e:
-        record_draft(ledger, {
-            "type": "sell", "counterparty": "宏发", "goods": "纸箱", "qty": 20,
-            "unit_price": 2.0, "amount": 40, "paid_amount": 40, "note": "",
-        }, "2026-11-02", "s1")
-    assert "库存" in str(e.value)
+def test_void_reverses(ledger):
+    r = record_draft(ledger, {"type": "expense", "category": "餐饮", "amount": 35, "note": "午饭"}, "2026-11-06", "r1")
+    v = void_transaction(ledger, r["txn_id"], "2026-11-06")
+    assert v["posted"]
+    assert ledger.balance("cash") == 0
+    assert ledger.month_pnl("2026-11") == {"income": 0.0, "expense": 0.0, "net": 0.0}  # 月报归零
+    assert ledger.month_pnl_by_account("2026-11") == {}  # 分类汇总也归零
+    # 留痕：两笔交易都在
+    ents = ledger.entries("2026-11")
+    assert len(ents) == 2
+    orig = next(e for e in ents if e["id"] == r["txn_id"])
+    assert orig["voided"] is True
 
 
-def test_sell_missing_counterparty(ledger):
+def test_void_is_idempotent(ledger):
+    r = record_draft(ledger, {"type": "income", "category": "工资", "amount": 23000, "note": "工资"}, "2026-11-05", "r1")
+    v1 = void_transaction(ledger, r["txn_id"], "2026-11-06")
+    v2 = void_transaction(ledger, r["txn_id"], "2026-11-06")
+    assert v1["posted"] and not v2["posted"]
+    assert ledger.balance("cash") == 0
+    d, c = ledger.trial_balance()
+    assert d == c
+
+
+def test_void_missing_txn(ledger):
     with pytest.raises(BookkeepingError):
-        record_draft(ledger, {
-            "type": "sell", "counterparty": None, "goods": "纸箱", "qty": 10,
-            "unit_price": 2.0, "amount": 20, "paid_amount": 20, "note": "",
-        }, "2026-11-01", "s1")
+        void_transaction(ledger, 999, "2026-11-06")
 
 
-def test_paid_more_than_amount_rejected(ledger):
+def test_void_a_void_rejected(ledger):
+    r = record_draft(ledger, {"type": "expense", "category": "餐饮", "amount": 35, "note": ""}, "2026-11-06", "r1")
+    v = void_transaction(ledger, r["txn_id"], "2026-11-06")
     with pytest.raises(BookkeepingError):
-        record_draft(ledger, {
-            "type": "buy", "counterparty": "老王", "goods": "纸箱", "qty": 10,
-            "unit_price": 2.0, "amount": 20, "paid_amount": 30, "note": "",
-        }, "2026-11-01", "b1")
+        void_transaction(ledger, v["txn_id"], "2026-11-07")
 
 
-def test_amount_from_qty_times_price(ledger):
-    # amount 为 null，靠 qty*unit_price
-    r = record_draft(ledger, {
-        "type": "buy", "counterparty": None, "goods": "纸箱", "qty": 100,
-        "unit_price": 2.5, "amount": None, "paid_amount": 250, "note": "",
-    }, "2026-11-01", "b1")
-    assert ledger.balance("inventory") == 250
+def test_void_cross_month_keeps_books_balanced(ledger):
+    # 11 月记的账，12 月作废：12 月出现负支出，11 月保持原样，总账仍平衡
+    r = record_draft(ledger, {"type": "expense", "category": "餐饮", "amount": 35, "note": "午饭"}, "2026-11-30", "r1")
+    void_transaction(ledger, r["txn_id"], "2026-12-01")
+    assert ledger.month_pnl("2026-11")["expense"] == 35.0
+    assert ledger.month_pnl("2026-12")["expense"] == -35.0
+    d, c = ledger.trial_balance()
+    assert d == c
+    assert ledger.balance("cash") == 0
+
+
+def test_memo_defaults_to_category(ledger):
+    r = record_draft(ledger, {"type": "expense", "category": "交通", "amount": 28, "note": ""}, "2026-11-06", "r1")
+    assert r["memo"] == "交通"
