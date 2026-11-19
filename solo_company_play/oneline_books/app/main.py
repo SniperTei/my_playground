@@ -211,4 +211,7 @@ def export(month: str | None = None):
 
 @app.get("/")
 def index():
-    return FileResponse(Path(__file__).resolve().parent / "static" / "index.html")
+    return FileResponse(
+        Path(__file__).resolve().parent / "static" / "index.html",
+        headers={"Cache-Control": "no-cache"},  # 无构建纯网页，避免手机浏览器缓存旧版
+    )
