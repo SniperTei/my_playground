@@ -21,6 +21,7 @@ from . import llm, prompts
 from .bookkeeping import (
     BookkeepingError,
     account_balances,
+    adjust_account_balance,
     accounts_list,
     add_account,
     add_category,
@@ -243,6 +244,21 @@ def set_account_default(name: str):
     try:
         with _lock:
             set_default_account(ledger, name)
+            return get_accounts()
+    except BookkeepingError as e:
+        raise HTTPException(422, str(e))
+
+
+class BalanceReq(BaseModel):
+    amount: float
+
+
+@app.post("/api/accounts/{name}/balance")
+def set_account_balance(name: str, req: BalanceReq):
+    """设置账户余额：差额走「余额调整」权益账户，复式平衡、可作废。"""
+    try:
+        with _lock:
+            adjust_account_balance(ledger, name, req.amount, date_cls.today().isoformat(), str(uuid.uuid4()))
             return get_accounts()
     except BookkeepingError as e:
         raise HTTPException(422, str(e))

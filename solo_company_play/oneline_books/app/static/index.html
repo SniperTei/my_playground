@@ -427,8 +427,9 @@ async function loadEntries() {
   box.innerHTML = list.map(e => {
     const d = e.draft || {};
     const isIn = d.type === 'income';
-    const amount = d.type === 'transfer' ? fmt(d.amount || 0) : (d.type ? (isIn ? '+' : '-') + fmt(d.amount || 0) : '');
-    const amtHtml = d.type ? `<span class="amt ${isIn ? 'pos' : 'neg'}">${amount}</span>` : '';
+    const neutral = d.type === 'transfer' || d.type === 'adjust';
+    const amount = neutral ? fmt(d.amount || 0) : (d.type ? (isIn ? '+' : '-') + fmt(d.amount || 0) : '');
+    const amtHtml = d.type ? `<span class="amt ${neutral ? '' : (isIn ? 'pos' : 'neg')}">${amount}</span>` : '';
     const btn = (d.type && !e.voided && !e.ref_id.startsWith('void-'))
       ? `<button class="btn danger" onclick="doVoid(${e.id}, '${(e.memo || '').replace(/'/g, "\\'")}')">作废</button>` : '';
     const mark = e.voided ? '<span class="voidmark">已作废</span>'
@@ -515,6 +516,7 @@ async function renderAccounts() {
     return `<div class="kv">
       <span><a href="javascript:void(0)" onclick="setDefaultAcct('${a}')" style="color:inherit;text-decoration:none;${isDefault ? 'font-weight:700' : ''}">${a}${isDefault ? ' ⭐默认' : ''}</a></span>
       <span><b style="font-size:14px;margin-right:10px">${bal == null ? '' : fmt(bal)}</b>
+        <button class="btn" onclick="setAcctBal('${a}', ${bal ?? 0})">设余额</button>
         <button class="btn danger" onclick="delAcct('${a}')">删</button></span>
     </div>`;
   }).join('');
@@ -545,6 +547,21 @@ async function setDefaultAcct(name) {
     const r = await api(`/api/accounts/${encodeURIComponent(name)}/default`, {});
     DEFAULT_ACCT = r.default;
     renderAccounts();
+  } catch (e) { alert('设置失败：' + e.message); }
+}
+async function setAcctBal(name, cur) {
+  const v = prompt(`把「${name}」的余额设为多少？\n当前余额：${fmt(cur)}\n（差额会记一笔「余额调整」，可作废）`, cur);
+  if (v === null) return;
+  const amount = parseFloat(v);
+  if (isNaN(amount)) { alert('要填数字'); return; }
+  try {
+    const r = await fetch(`/api/accounts/${encodeURIComponent(name)}/balance`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({amount})
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+    renderAccounts();
+    loadReport();
   } catch (e) { alert('设置失败：' + e.message); }
 }
 

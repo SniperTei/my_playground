@@ -115,13 +115,48 @@ def set_default_account(ledger: Ledger, name: str) -> None:
     ledger.add_name(DEFAULT_ACCOUNT_KIND, name)
 
 
+ADJUSTMENT_EQUITY = "余额调整"  # 设置余额的差额对冲账户（权益）
+
+
+def adjust_account_balance(ledger: Ledger, name: str, target: float, date: str, ref_id: str) -> dict:
+    """把账户余额设为 target：差额入「余额调整」权益账户（复式平衡，可作废）。
+
+    期初补录/对账纠偏用：Dr 账户/Cr 余额调整（调增），反向（调减）。
+    """
+    if name not in ledger.names(ACCOUNT_KIND):
+        raise BookkeepingError(f"没有账户「{name}」")
+    try:
+        target = _r2(target)
+    except (TypeError, ValueError):
+        raise BookkeepingError("余额要填数字")
+    diff = _r2(target - ledger.balance(name))
+    if diff == 0:
+        return {"posted": False, "account": name, "balance": target, "memo": "余额已经是这个数"}
+    ledger.ensure_account(name, "asset")
+    ledger.ensure_account(ADJUSTMENT_EQUITY, "equity")
+    if diff > 0:
+        lines = [(name, diff, 0.0), (ADJUSTMENT_EQUITY, 0.0, diff)]
+    else:
+        lines = [(ADJUSTMENT_EQUITY, -diff, 0.0), (name, 0.0, -diff)]
+    memo = f"「{name}」余额调整为 {target:g}"
+    txn_id = ledger.post(ref_id, date, memo, lines, draft={"type": "adjust", "account": name, "amount": target})
+    return {
+        "posted": txn_id is not None,
+        "txn_id": txn_id,
+        "account": name,
+        "balance": target,
+        "memo": memo,
+        "lines": [{"account": a, "debit": _r2(d), "credit": _r2(c)} for a, d, c in lines],
+    }
+
+
 def account_balances(ledger: Ledger) -> dict[str, float]:
     """各资金账户余额（资产借方为正）+ 合计。"""
     registered = set(ledger.names(ACCOUNT_KIND))
     result = {n: ledger.balance(n) for n in accounts_list(ledger)}
     # 注册表外可能残留已删账户的历史余额，归到「其他账户」
     extra = {a: b for a, b in ledger.balances().items() if a not in registered and b != 0
-             and not a.startswith(("expense:", "income:")) and a not in ("cash", "founder_equity", "inventory")}
+             and not a.startswith(("expense:", "income:")) and a not in ("cash", "founder_equity", "inventory", ADJUSTMENT_EQUITY)}
     if extra:
         result.update(extra)
     result["__total__"] = round(sum(v for k, v in result.items() if k != "__total__"), 2)

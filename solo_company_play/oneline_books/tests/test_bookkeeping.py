@@ -5,6 +5,7 @@ from app.bookkeeping import (
     INCOME_CATEGORIES,
     BookkeepingError,
     account_balances,
+    adjust_account_balance,
     accounts_list,
     add_account,
     add_category,
@@ -306,6 +307,43 @@ def test_account_balances_total(ledger):
     assert b["支付宝"] == 1000
     assert b["现金"] == -30
     assert b["__total__"] == 970
+
+
+# ----- 设置余额 -----
+
+def test_adjust_balance_up_and_down(ledger):
+    add_account(ledger, "尾号1234")
+    r = adjust_account_balance(ledger, "尾号1234", 5000, "2026-11-01", "adj1")
+    assert r["posted"]
+    assert ledger.balance("尾号1234") == 5000
+    adjust_account_balance(ledger, "尾号1234", 3000, "2026-11-02", "adj2")
+    assert ledger.balance("尾号1234") == 3000
+    # 不算收支，总账平衡
+    assert ledger.month_pnl("2026-11") == {"income": 0.0, "expense": 0.0, "net": 0.0}
+    d, c = ledger.trial_balance()
+    assert d == c
+
+
+def test_adjust_balance_noop_and_errors(ledger):
+    add_account(ledger, "尾号1234")
+    adjust_account_balance(ledger, "尾号1234", 2000, "2026-11-01", "adj1")
+    r = adjust_account_balance(ledger, "尾号1234", 2000, "2026-11-02", "adj2")  # 相同值
+    assert not r["posted"]
+    assert ledger.balance("尾号1234") == 2000
+    with pytest.raises(BookkeepingError):  # 未知账户
+        adjust_account_balance(ledger, "不存在的", 100, "2026-11-01", "x")
+
+
+def test_adjust_balance_voidable_and_not_in_pnl(ledger):
+    add_account(ledger, "尾号1234")
+    r = adjust_account_balance(ledger, "尾号1234", 5000, "2026-11-01", "adj1")
+    record_draft(ledger, {"type": "expense", "category": "餐饮", "amount": 35, "account": "尾号1234", "note": ""}, "2026-11-06", "r1")
+    assert ledger.balance("尾号1234") == 4965
+    b = account_balances(ledger)
+    assert "余额调整" not in b  # 权益账户不混进资金账户列表
+    assert b["尾号1234"] == 4965
+    void_transaction(ledger, r["txn_id"], "2026-11-07")  # 作废调整 → 余额回退
+    assert ledger.balance("尾号1234") == -35
 
 
 def test_migrate_cash_account(tmp_path):
