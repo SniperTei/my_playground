@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>一句话账本</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --ink: #1a1d24; --sub: #7a7f8c;
+    --brand: #2563eb; --brand-weak: #eff4ff; --ok: #16a34a; --bad: #dc2626;
+    --line: #e6e8ee; --radius: 14px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--ink); font-size: 15px;
+    max-width: 520px; margin: 0 auto; min-height: 100dvh; padding-bottom: 72px;
+  }
+  header {
+    position: sticky; top: 0; z-index: 10; background: var(--card);
+    border-bottom: 1px solid var(--line);
+    padding: 14px 16px; display: flex; align-items: baseline; gap: 8px;
+  }
+  header h1 { font-size: 18px; }
+  header span { font-size: 12px; color: var(--sub); }
+  main { padding: 14px; }
+  .tab { display: none; }
+  .tab.active { display: block; }
+  nav {
+    position: fixed; bottom: 0; left: 50%; transform: translateX(-50%);
+    width: 100%; max-width: 520px; background: var(--card);
+    border-top: 1px solid var(--line); display: flex;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  nav button {
+    flex: 1; background: none; border: none; padding: 8px 0 10px;
+    font-size: 12px; color: var(--sub); cursor: pointer;
+  }
+  nav button .ico { font-size: 20px; display: block; margin-bottom: 2px; }
+  nav button.active { color: var(--brand); font-weight: 600; }
+
+  .box { background: var(--card); border-radius: var(--radius); padding: 14px; margin-bottom: 12px; border: 1px solid var(--line); }
+  textarea {
+    width: 100%; border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px; font-size: 16px; font-family: inherit; resize: none; background: var(--bg);
+  }
+  textarea:focus { outline: 2px solid var(--brand); background: #fff; }
+  .btn {
+    display: block; width: 100%; border: none; border-radius: 10px;
+    padding: 13px; font-size: 16px; font-weight: 600; cursor: pointer;
+    background: var(--brand); color: #fff;
+  }
+  .btn:disabled { opacity: .5; }
+  .btn.ghost { background: var(--brand-weak); color: var(--brand); }
+  .hint { font-size: 12px; color: var(--sub); margin-top: 8px; line-height: 1.6; }
+  .err { color: var(--bad); font-size: 13px; margin-top: 8px; line-height: 1.6; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .field label { display: block; font-size: 12px; color: var(--sub); margin-bottom: 4px; }
+  .field input, .field select {
+    width: 100%; border: 1px solid var(--line); border-radius: 8px;
+    padding: 9px 10px; font-size: 15px; background: var(--bg); font-family: inherit;
+  }
+  .field input:focus, .field select:focus { outline: 2px solid var(--brand); background: #fff; }
+  .field.wide { grid-column: 1 / -1; }
+
+  .kv { display: flex; justify-content: space-between; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+  .kv:last-child { border-bottom: none; }
+  .kv b { font-size: 16px; }
+  .pos { color: var(--ok); } .neg { color: var(--bad); }
+  .lines { font-size: 13px; color: var(--sub); line-height: 1.8; margin-top: 8px; }
+  .entry { padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .entry:last-child { border-bottom: none; }
+  .entry .m { display: flex; justify-content: space-between; font-size: 14px; }
+  .entry .d { font-size: 12px; color: var(--sub); margin-top: 3px; }
+  .tag { font-size: 11px; background: var(--brand-weak); color: var(--brand); border-radius: 5px; padding: 1px 6px; margin-right: 6px; }
+
+  .chat { display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 85%; padding: 10px 12px; border-radius: 12px; line-height: 1.6; font-size: 14px; white-space: pre-wrap; }
+  .msg.ai { background: var(--card); border: 1px solid var(--line); align-self: flex-start; }
+  .msg.me { background: var(--brand); color: #fff; align-self: flex-end; }
+  .askbar { display: flex; gap: 8px; margin-top: 12px; }
+  .askbar input { flex: 1; border: 1px solid var(--line); border-radius: 10px; padding: 11px; font-size: 15px; background: var(--bg); font-family: inherit; }
+  .askbar button { border: none; border-radius: 10px; background: var(--brand); color: #fff; padding: 0 18px; font-size: 15px; font-weight: 600; }
+  h3.sec { font-size: 13px; color: var(--sub); margin: 4px 0 8px; font-weight: 500; }
+  .monthbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+  .monthbar input { border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font-size: 14px; background: var(--card); font-family: inherit; }
+  .empty { text-align: center; color: var(--sub); font-size: 13px; padding: 24px 0; }
+</style>
+</head>
+<body>
+<header><h1>一句话账本</h1><span>说了就记，问了就答</span></header>
+
+<main>
+  <!-- 记一笔 -->
+  <section class="tab active" id="tab-record">
+    <div class="box">
+      <textarea id="say" rows="3" placeholder="说一句话，比如：&#10;进了500个纸箱，单价2.8，付了全款"></textarea>
+      <div style="height:10px"></div>
+      <button class="btn" id="parseBtn" onclick="doParse()">解析</button>
+      <div class="hint">AI 先记草稿，你确认了才入账。付没付钱、卖给谁，都会先问你。</div>
+      <div class="err" id="parseErr"></div>
+    </div>
+    <div class="box" id="draftCard" style="display:none">
+      <h3 class="sec">草稿 · 核对后入账（可改）</h3>
+      <div class="grid">
+        <div class="field"><label>类型</label>
+          <select id="d_type">
+            <option value="buy">进货</option><option value="sell">卖货</option>
+            <option value="receipt">收款</option><option value="payment">付款</option>
+            <option value="expense">杂费</option>
+          </select></div>
+        <div class="field"><label>日期</label><input type="date" id="d_date"></div>
+        <div class="field"><label>对方</label><input id="d_cp" placeholder="客户/供应商"></div>
+        <div class="field"><label>品名</label><input id="d_goods" placeholder="货品"></div>
+        <div class="field"><label>数量</label><input id="d_qty" inputmode="decimal"></div>
+        <div class="field"><label>单价</label><input id="d_price" inputmode="decimal"></div>
+        <div class="field"><label>总金额</label><input id="d_amount" inputmode="decimal"></div>
+        <div class="field"><label>已付/已收</label><input id="d_paid" inputmode="decimal" placeholder="没付留空"></div>
+        <div class="field wide"><label>备注</label><input id="d_note"></div>
+      </div>
+      <div style="height:12px"></div>
+      <button class="btn" id="recordBtn" onclick="doRecord()">确认入账</button>
+      <div class="err" id="recordErr"></div>
+      <div class="lines" id="recordOk"></div>
+    </div>
+  </section>
+
+  <!-- 流水 -->
+  <section class="tab" id="tab-entries">
+    <div class="monthbar"><input type="month" id="emonth" onchange="loadEntries()"><button class="btn ghost" style="width:auto;padding:8px 14px" onclick="document.getElementById('emonth').value='';loadEntries()">全部</button></div>
+    <div class="box" id="entriesBox"><div class="empty">暂无流水</div></div>
+  </section>
+
+  <!-- 问账 -->
+  <section class="tab" id="tab-ask">
+    <div class="box chat" id="chatBox">
+      <div class="msg ai">你好，我是账房先生。这个月赚了多少、谁还欠钱，随便问。</div>
+    </div>
+    <div class="askbar">
+      <input id="question" placeholder="这个月赚了多少？谁欠我钱？">
+      <button onclick="doAsk()">问</button>
+    </div>
+  </section>
+
+  <!-- 月报 -->
+  <section class="tab" id="tab-report">
+    <div class="monthbar"><input type="month" id="rmonth" onchange="loadReport()"></div>
+    <div id="reportBox"></div>
+  </section>
+</main>
+
+<nav>
+  <button class="active" data-tab="record"><span class="ico">✏️</span>记一笔</button>
+  <button data-tab="entries"><span class="ico">📋</span>流水</button>
+  <button data-tab="ask"><span class="ico">💬</span>问账</button>
+  <button data-tab="report"><span class="ico">📊</span>月报</button>
+</nav>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt = n => (n < 0 ? '-' : '') + Math.abs(n).toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const TYPE_NAME = {buy: '进货', sell: '卖货', receipt: '收款', payment: '付款', expense: '杂费'};
+
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('active', x === b));
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.id === 'tab-' + b.dataset.tab));
+  if (b.dataset.tab === 'entries') loadEntries();
+  if (b.dataset.tab === 'report') loadReport();
+});
+
+let draft = null;
+$('d_date').value = new Date().toISOString().slice(0, 10);
+$('emonth').value = $('rmonth').value = new Date().toISOString().slice(0, 7);
+
+async function api(path, body) {
+  const r = await fetch(path, body ? {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+  } : undefined);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+}
+
+async function doParse() {
+  $('parseErr').textContent = ''; $('recordErr').textContent = ''; $('recordOk').textContent = '';
+  const text = $('say').value.trim();
+  if (!text) return;
+  $('parseBtn').disabled = true; $('parseBtn').textContent = 'AI 正在听…';
+  try {
+    const d = await api('/api/parse', {text});
+    if (d.error) {
+      $('parseErr').textContent = '🤔 ' + (d.question || d.error);
+      $('draftCard').style.display = 'none';
+      return;
+    }
+    draft = d;
+    $('d_type').value = d.type in TYPE_NAME ? d.type : 'expense';
+    $('d_cp').value = d.counterparty || '';
+    $('d_goods').value = d.goods || '';
+    $('d_qty').value = d.qty ?? '';
+    $('d_price').value = d.unit_price ?? '';
+    $('d_amount').value = d.amount ?? '';
+    $('d_paid').value = d.paid_amount ?? '';
+    $('d_note').value = d.note || '';
+    $('draftCard').style.display = '';
+    $('draftCard').scrollIntoView({behavior: 'smooth'});
+  } catch (e) {
+    $('parseErr').textContent = e.message;
+  } finally {
+    $('parseBtn').disabled = false; $('parseBtn').textContent = '解析';
+  }
+}
+
+function collectDraft() {
+  const num = v => v === '' || v == null ? null : Number(v);
+  return {
+    type: $('d_type').value, counterparty: $('d_cp').value.trim() || null,
+    goods: $('d_goods').value.trim() || null, qty: num($('d_qty').value),
+    unit_price: num($('d_price').value), amount: num($('d_amount').value),
+    paid_amount: num($('d_paid').value), note: $('d_note').value.trim() || null,
+  };
+}
+
+async function doRecord() {
+  $('recordErr').textContent = ''; $('recordOk').textContent = '';
+  $('recordBtn').disabled = true;
+  try {
+    const r = await api('/api/record', {draft: collectDraft(), date: $('d_date').value});
+    const lines = r.lines.map(l =>
+      `${l.account} ${l.debit ? '↑' + fmt(l.debit) : '↓' + fmt(l.credit)}`).join('　');
+    $('recordOk').innerHTML = `✅ 已入账：${r.memo}<br>${lines}` + (r.cogs ? `<br>这批货成本 ${fmt(r.cogs)}（FIFO）` : '');
+    $('say').value = ''; $('draftCard').style.display = 'none';
+  } catch (e) {
+    $('recordErr').textContent = '🤔 ' + e.message;
+  } finally {
+    $('recordBtn').disabled = false;
+  }
+}
+
+async function loadEntries() {
+  const m = $('emonth').value;
+  const list = await api('/api/entries' + (m ? '?month=' + m : ''));
+  const box = $('entriesBox');
+  if (!list.length) { box.innerHTML = '<div class="empty">暂无流水</div>'; return; }
+  box.innerHTML = list.map(e => `<div class="entry">
+    <div class="m"><span><span class="tag">${e.date}</span>${e.memo}</span></div>
+    <div class="d">${e.lines.map(l => `${l.account} ${l.debit ? '↑' + fmt(l.debit) : '↓' + fmt(l.credit)}`).join('　')}</div>
+  </div>`).join('');
+}
+
+async function doAsk() {
+  const q = $('question').value.trim();
+  if (!q) return;
+  const box = $('chatBox');
+  box.insertAdjacentHTML('beforeend', `<div class="msg me">${q.replace(/</g, '&lt;')}</div>`);
+  $('question').value = '';
+  box.insertAdjacentHTML('beforeend', '<div class="msg ai" id="thinking">算一下…</div>');
+  box.scrollTop = box.scrollHeight;
+  try {
+    const r = await api('/api/ask', {question: q, month: $('rmonth').value || null});
+    $('thinking').textContent = r.answer;
+  } catch (e) {
+    $('thinking').textContent = '出错了：' + e.message;
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+async function loadReport() {
+  const r = await api('/api/report?month=' + $('rmonth').value);
+  const p = r.pnl, ar = r.ar_ap.ar, ap = r.ar_ap.ap;
+  const names = o => Object.keys(o).map(k => `<div class="kv"><span>${k}</span><b class="neg">${fmt(o[k])}</b></div>`).join('') || '<div class="empty">无</div>';
+  $('reportBox').innerHTML = `
+    <div class="box">
+      <h3 class="sec">${r.month} 利润</h3>
+      <div class="kv"><span>收入</span><b class="pos">${fmt(p.income)}</b></div>
+      <div class="kv"><span>成本+杂费</span><b class="neg">${fmt(p.expense)}</b></div>
+      <div class="kv"><span>净利</span><b class="${p.net >= 0 ? 'pos' : 'neg'}">${fmt(p.net)}</b></div>
+    </div>
+    <div class="box"><h3 class="sec">现金余额（累计）</h3><div class="kv"><span>现金</span><b>${fmt(r.cash)}</b></div></div>
+    <div class="box"><h3 class="sec">谁欠我（应收）</h3>${names(ar)}</div>
+    <div class="box"><h3 class="sec">我欠谁（应付）</h3>${names(ap)}</div>`;
+}
+</script>
+</body>
+</html>
