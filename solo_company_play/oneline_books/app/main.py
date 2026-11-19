@@ -110,7 +110,7 @@ def parse(req: ParseReq):
     if not text:
         raise HTTPException(422, "说句话试试，比如「午饭花了35」")
     try:
-        draft = llm.chat_json(prompts.PARSE_SYSTEM, text)
+        draft = llm.chat_json(prompts.parse_system(), text)
     except RuntimeError as e:  # no API key
         raise HTTPException(503, str(e))
     except Exception as e:

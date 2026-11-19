@@ -192,9 +192,10 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   if (b.dataset.tab === 'report') loadReport();
 });
 
+const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
 let draft = null;
-$('d_date').value = new Date().toISOString().slice(0, 10);
-$('emonth').value = $('rmonth').value = new Date().toISOString().slice(0, 7);
+$('d_date').value = todayStr();
+$('emonth').value = $('rmonth').value = todayStr().slice(0, 7);
 fillCategories();
 
 function fillCategories() {
@@ -258,6 +259,7 @@ async function doParse() {
     $('d_type').value = d.type === 'income' ? 'income' : 'expense';
     fillCategories();
     $('d_category').value = CATS[$('d_type').value].includes(d.category) ? d.category : '其他';
+    if (d.date) $('d_date').value = d.date;  // AI 换算出的绝对日期（昨天/上周X…）
     $('d_amount').value = d.amount ?? '';
     $('d_note').value = d.note || '';
     $('recordBtn').textContent = '确认入账';
@@ -288,6 +290,7 @@ async function doRecord(force) {
       `${l.account} ${l.debit ? '↑' + fmt(l.debit) : '↓' + fmt(l.credit)}`).join('　');
     $('recordOk').innerHTML = `✅ 已入账：${r.memo}<br>${lines}`;
     $('say').value = ''; $('draftCard').style.display = 'none';
+    $('d_date').value = todayStr();  // 日期复位，别把「昨天」带到下一笔
     $('recordBtn').textContent = '确认入账';
   } catch (e) {
     if (e.detail && e.detail.duplicate) {

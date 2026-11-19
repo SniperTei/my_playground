@@ -1,20 +1,29 @@
 """提示词：一句话解析（个人收支）+ 问账。"""
 
+from datetime import date as date_cls
+
 from app.bookkeeping import EXPENSE_CATEGORIES, INCOME_CATEGORIES
 
-PARSE_SYSTEM = f"""你是一个个人记账解析器。把用户的一句口语转换成 JSON 草稿（draft），不计算、不补猜。
+PARSE_SYSTEM_TEMPLATE = """你是一个个人记账解析器。把用户的一句口语转换成 JSON 草稿（draft），不计算、不补猜。
+
+今天是 {today}（YYYY-MM-DD，星期{weekday_cn}）。
 
 输出 schema（金额为数字，单位元）：
 {{
   "type": "income | expense",
   "category": "内置分类之一",
   "amount": 金额数字,
+  "date": "YYYY-MM-DD 或 null（没提日期就 null）",
   "note": "原话摘要"
 }}
 
+日期规则：
+- 用户提到相对日期（昨天、前天、上周X、大前天…）或具体日期（3号、11月2日），换算成绝对日期 YYYY-MM-DD 填进 date。
+- 完全没提日期 → date 填 null，不要默认成今天。
+
 内置分类（只能从中选）：
-- 支出 expense：{'、'.join(EXPENSE_CATEGORIES)}
-- 收入 income：{'、'.join(INCOME_CATEGORIES)}
+- 支出 expense：{expense_cats}
+- 收入 income：{income_cats}
 
 判定规则：
 - 花钱/消费/缴费 → expense；挣钱/到账/收钱 → income。
@@ -27,41 +36,53 @@ PARSE_SYSTEM = f"""你是一个个人记账解析器。把用户的一句口语�
 关键约束：
 1. 只输出 JSON，不要输出任何其他文字。
 2. 用户没说的信息不要编造；但分类必须选一个（拿不准选「其他」）。
-3. 口语数字要解析："一千二"=1200，"3块5"=3.5，"两个w"/"2万"/"2万3"=20000/23000，"仨"=3。
+3. 口语数字要解析："一千二"=1200，"3块5"=3.5，"9块9"=9.9，"两个w"/"2万"/"2万3"=20000/23000，"仨"=3。
 4. 如果判断不出收入还是支出，或算不出金额，输出：
    {{"error": "缺少信息", "question": "用一句口语追问用户的话"}}
 
-示例：
-"午饭花了35"
-→ {{"type":"expense","category":"餐饮","amount":35,"note":"午饭"}}
+示例（示例里的"今天"以提示词开头给的日期为准）：
+"午饭花了35"（没提日期）
+→ {{"type":"expense","category":"餐饮","amount":35,"date":null,"note":"午饭"}}
 
-"打车28"
-→ {{"type":"expense","category":"交通","amount":28,"note":"打车"}}
+"昨天喝酒花了9.9"
+→ {{"type":"expense","category":"餐饮","amount":9.9,"date":"<今天-1天>","note":"昨天喝酒"}}
+
+"前天打车28"
+→ {{"type":"expense","category":"交通","amount":28,"date":"<今天-2天>","note":"前天打车"}}
 
 "发工资了2万3"
-→ {{"type":"income","category":"工资","amount":23000,"note":"发工资"}}
+→ {{"type":"income","category":"工资","amount":23000,"date":null,"note":"发工资"}}
 
 "朋友随礼500"
-→ {{"type":"expense","category":"人情","amount":500,"note":"朋友随礼"}}
+→ {{"type":"expense","category":"人情","amount":500,"date":null,"note":"朋友随礼"}}
 
 "基金赚了1200"
-→ {{"type":"income","category":"理财","amount":1200,"note":"基金收益"}}
+→ {{"type":"income","category":"理财","amount":1200,"date":null,"note":"基金收益"}}
 
-"双十一买了件外套699"
-→ {{"type":"expense","category":"购物","amount":699,"note":"买外套"}}
+"3号买的件外套699"
+→ {{"type":"expense","category":"购物","amount":699,"date":"<本月3号>","note":"买外套"}}
 
 "帮朋友做设计收了2000"
-→ {{"type":"income","category":"副业","amount":2000,"note":"设计兼职"}}
-
-"话费充了100"
-→ {{"type":"expense","category":"通讯","amount":100,"note":"充话费"}}
+→ {{"type":"income","category":"副业","amount":2000,"date":null,"note":"设计兼职"}}
 
 "花了60块"（看不出花在哪）
-→ {{"type":"expense","category":"其他","amount":60,"note":"杂项支出"}}
+→ {{"type":"expense","category":"其他","amount":60,"date":null,"note":"杂项支出"}}
 
 "买了个东西"（没说金额）
 → {{"error":"缺少信息","question":"花了多少钱？"}}
 """
+
+
+def parse_system(today: str | None = None) -> str:
+    """组装解析提示词：注入今天的日期和星期，供相对日期（昨天/上周X）换算。"""
+    d = date_cls.fromisoformat(today) if today else date_cls.today()
+    weekday_cn = "一二三四五六日"[d.weekday()]
+    return PARSE_SYSTEM_TEMPLATE.format(
+        today=d.isoformat(),
+        weekday_cn=weekday_cn,
+        expense_cats="、".join(EXPENSE_CATEGORIES),
+        income_cats="、".join(INCOME_CATEGORIES),
+    )
 
 ASK_SYSTEM = """你是一个贴心的个人记账助手。根据下面提供的账本数据回答用户的问题。
 数据里有当月和上月的分类汇总报表，可以对比着说。
