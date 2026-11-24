@@ -65,6 +65,29 @@ def test_wechat_parse():
     assert r1["direction"] == "in"
 
 
+def test_xlsx_parse():
+    """微信现在默认导出 xlsx：Excel 第一个工作表 → CSV → 原管道。"""
+    import io
+    from datetime import datetime as dt
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["微信支付账单明细", ""])
+    ws.append(["类型", "单号", "商户单号", "交易时间", "交易对方", "商品", "收/支出", "金额(元)", "支付方式", "当前状态"])
+    ws.append(["/", "T1", "W1", dt(2025, 11, 1, 10, 0, 0), "全家便利店", "早饭", "支出", 12.5, "/零钱", "支付成功"])
+    ws.append(["/", "T2", "W2", dt(2025, 11, 2, 10, 0, 0), "某某公司", "报销回款", "收入", 300.0, "/零钱", "已存入零钱"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    res = parse_statement(buf.getvalue())
+    assert res["source"] == "wechat" and res["needs_mapping"] is False
+    assert len(res["rows"]) == 2
+    assert res["rows"][0]["date"] == "2025-11-01"  # datetime 单元格 → 日期可再解析
+    assert res["rows"][0]["amount"] == 12.5
+    assert res["rows"][1]["direction"] == "in"
+
+
 # ---------- 解析：generic（收入/支出双列）+ 手动映射 ----------
 
 GENERIC_CSV = "日期,摘要,收入金额,支出金额,余额\n2025-11-01,ATM取款,,500.00,1000.00\n2025-11-02,利息,3.20,,1003.20\n"

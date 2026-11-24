@@ -35,15 +35,46 @@ MAX_SCAN_LINES = 40
 
 
 def _decode(data) -> str:
-    """字节流解码级联：utf-8 → gb18030 → latin-1（不抛错兜底）。str 原样返回。"""
+    """字节流解码级联：xlsx（PK 魔数）→ 转 CSV 文本；否则 utf-8 → gb18030 → latin-1。str 原样返回。"""
     if isinstance(data, str):
         return data
+    if bytes(data[:2]) == b"PK":  # xlsx 是 zip 包，魔数 PK\x03\x04
+        return _xlsx_to_csv(bytes(data))
     for enc in ("utf-8", "gb18030"):
         try:
             return data.decode(enc)
         except (UnicodeDecodeError, LookupError):
             continue
     return data.decode("latin-1", errors="replace")
+
+
+def _xlsx_to_csv(data: bytes) -> str:
+    """xlsx 第一个工作表 → CSV 文本（datetime 定格为 'YYYY-MM-DD HH:MM:SS'，_date 可再解析）。"""
+    import io
+    from datetime import date as _date, datetime as _dt
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    try:
+        ws = wb.worksheets[0]
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        for row in ws.iter_rows(values_only=True):
+            cells = []
+            for v in row:
+                if v is None:
+                    cells.append("")
+                elif isinstance(v, _dt):
+                    cells.append(v.strftime("%Y-%m-%d %H:%M:%S"))
+                elif isinstance(v, _date):
+                    cells.append(v.isoformat())
+                else:
+                    cells.append(str(v))
+            writer.writerow(cells)
+        return buf.getvalue()
+    finally:
+        wb.close()
 
 
 def _read_rows(text: str) -> list[list[str]]:
