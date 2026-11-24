@@ -9,15 +9,16 @@ import csv
 import io
 import os
 import threading
+import time
 import uuid
 from datetime import date as date_cls
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-from . import llm, prompts
+from . import llm, prompts, statement
 from .bookkeeping import (
     BookkeepingError,
     account_balances,
@@ -37,6 +38,7 @@ from .bookkeeping import (
     void_transaction,
 )
 from .ledger import Ledger
+from .reconcile import match_statement, run_reconcile_agent
 
 DB_PATH = os.environ.get("BOOKS_DB", Path(__file__).resolve().parent.parent / "data" / "books.db")
 INITIAL_CASH = float(os.environ.get("BOOKS_INITIAL_CASH", "0"))
@@ -62,6 +64,34 @@ class AskReq(BaseModel):
     question: str
     month: str | None = None
     history: list[dict] = []
+
+
+# ----- 对账会话（进程内，TTL 30 分钟惰性清理）-----
+
+_RECON_TTL = 30 * 60
+_RECON_SESSIONS: dict[str, dict] = {}  # session_id → {created, statement_rows, matched, dup_candidates, unmatched, proposals}
+
+
+def _recon_gc():
+    import time
+
+    now = time.time()
+    for sid in [k for k, v in _RECON_SESSIONS.items() if now - v["created"] > _RECON_TTL]:
+        _RECON_SESSIONS.pop(sid, None)
+
+
+def _recon_session(sid: str) -> dict:
+    s = _RECON_SESSIONS.get(sid)
+    if s is None:
+        raise HTTPException(404, "对账会话不存在或已过期，请重新上传账单")
+    return s
+
+
+def _match_and_split(rows: list[dict]) -> dict:
+    """锁内：确定性匹配账单行 vs 账本全量流水。"""
+    with _lock:
+        entries = ledger.entries()
+    return match_statement(rows, entries)
 
 
 def _month_or_now(month: str | None) -> str:
@@ -351,6 +381,85 @@ def export(month: str | None = None):
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
+
+
+class MapReq(BaseModel):
+    session_id: str
+    mapping: dict
+
+
+class ReconRunReq(BaseModel):
+    session_id: str
+
+
+@app.post("/api/reconcile/upload")
+async def reconcile_upload(file: UploadFile | None = File(None), text: str | None = Form(None)):
+    """上传账单（multipart 文件或 text 粘贴）→ 解析 + 确定性匹配。"""
+    _recon_gc()
+    if file is not None:
+        data = await file.read()
+    elif text:
+        data = text.encode("utf-8")
+    else:
+        raise HTTPException(422, "请上传文件或粘贴账单文本")
+    if not data.strip():
+        raise HTTPException(422, "账单内容为空")
+    try:
+        parsed = statement.parse_statement(data)
+    except Exception as e:
+        raise HTTPException(422, f"账单解析失败：{e}")
+    sid = str(uuid.uuid4())
+    session = {"created": time.time(), "raw": data, "parsed": parsed,
+               "matched": [], "dup_candidates": [], "unmatched": [], "proposals": None}
+    _RECON_SESSIONS[sid] = session
+    if parsed["needs_mapping"]:
+        return {"session_id": sid, "source": None, "needs_mapping": True,
+                "columns": parsed["columns"], "header_row_hint": parsed["header_row_hint"], "rows": []}
+    split = _match_and_split(parsed["rows"])
+    session.update(matched=split["matched"], dup_candidates=split["dup_candidates"],
+                   unmatched=split["unmatched"])
+    return {"session_id": sid, "source": parsed["source"], "needs_mapping": False,
+            "matched": split["matched"], "dup_candidates": split["dup_candidates"],
+            "unmatched": split["unmatched"]}
+
+
+@app.post("/api/reconcile/map")
+def reconcile_map(req: MapReq):
+    """自动识别失败后手动列映射重解析。"""
+    session = _recon_session(req.session_id)
+    try:
+        parsed = statement.parse_statement(session["raw"], req.mapping)
+    except Exception as e:
+        raise HTTPException(422, f"映射解析失败：{e}")
+    session["parsed"] = parsed
+    if parsed["needs_mapping"]:
+        return {"session_id": req.session_id, "needs_mapping": True,
+                "columns": parsed["columns"], "rows": []}
+    split = _match_and_split(parsed["rows"])
+    session.update(matched=split["matched"], dup_candidates=split["dup_candidates"],
+                   unmatched=split["unmatched"])
+    return {"session_id": req.session_id, "source": parsed["source"], "needs_mapping": False,
+            "matched": split["matched"], "dup_candidates": split["dup_candidates"],
+            "unmatched": split["unmatched"]}
+
+
+@app.post("/api/reconcile/run")
+def reconcile_run(req: ReconRunReq):
+    """agent 分析未匹配行 → proposals（人确认后走 /api/record、/api/void）。"""
+    session = _recon_session(req.session_id)
+    if session["parsed"].get("needs_mapping"):
+        raise HTTPException(422, "账单还没解析成功，先完成列映射")
+    if not session["unmatched"] and not session["dup_candidates"]:
+        return {"session_id": req.session_id, "proposals": [], "message": "没有需要 AI 分析的行"}
+    try:
+        res = run_reconcile_agent(ledger, session, lock=_lock)
+    except Exception as e:
+        raise HTTPException(502, f"AI 分析失败：{e}")
+    session["proposals"] = res
+    if res.get("error"):
+        raise HTTPException(502, res["error"])
+    return {"session_id": req.session_id, "proposals": res["proposals"],
+            "iterations": res.get("iterations")}
 
 
 @app.get("/")
